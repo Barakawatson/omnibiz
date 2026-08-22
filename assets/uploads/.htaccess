@@ -1,0 +1,47 @@
+# ============================================================
+# Uploads are DATA, never code.
+# ------------------------------------------------------------
+# This directory holds files supplied by users (product photos,
+# profile pictures, supplier invoices) and is served directly by
+# Apache. Nothing in here may ever be executed.
+#
+# includes/uploads.php already validates every file by its real
+# content and generates the stored filename itself, so a script
+# should never land here. This is the second line of defence: if
+# one ever does - through a bug, a restored backup, or a path
+# nobody has thought of yet - the server will hand it over as
+# plain text instead of running it.
+# ============================================================
+
+# Stop Apache handing anything to a scripting engine.
+<IfModule mod_php.c>
+    php_flag engine off
+</IfModule>
+<IfModule mod_php7.c>
+    php_flag engine off
+</IfModule>
+<IfModule mod_php5.c>
+    php_flag engine off
+</IfModule>
+
+# Detach every executable handler and type, so a file named .php,
+# .phtml, .pl and so on is treated as a download rather than run.
+RemoveHandler .php .phtml .php3 .php4 .php5 .php7 .phps .pht .phar
+RemoveHandler .cgi .pl .py .rb .sh .jsp .asp .aspx
+RemoveType    .php .phtml .php3 .php4 .php5 .php7 .phps .pht .phar
+AddType text/plain .php .phtml .php3 .php4 .php5 .php7 .phps .pht .phar
+
+# Belt and braces: refuse the request outright for anything that
+# even looks executable.
+<FilesMatch "\.(php|phtml|php[0-9]|phps|pht|phar|cgi|pl|py|rb|sh|jsp|asp|aspx|htaccess)$">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order allow,deny
+        Deny from all
+    </IfModule>
+</FilesMatch>
+
+# No directory listings of the upload tree.
+Options -Indexes -ExecCGI

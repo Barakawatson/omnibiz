@@ -1,0 +1,36 @@
+/* ============================================================
+   LEGACY ADMIN STYLES — residual only
+   ------------------------------------------------------------
+   This file used to carry the application shell (sidebar, content
+   offset, overlay, toggles) plus ~450 lines of styling for screens
+   that no longer exist — cards named `card-daftar-poli`,
+   `card-profildokter`, `table-pasien` and similar, left over from
+   the clinic/laundry system this codebase was converted from.
+
+   All of that is gone. The shell now lives in ui.css, which is the
+   single source of truth for layout, components and responsive
+   behaviour.
+
+   Removing the old shell rules also fixed a real bug: this file
+   contained `@media (max-width: 1440px) { .sidebar { left: -290px } }`,
+   which pushed the sidebar off-screen on ordinary 1366px laptops.
+   ui.css keeps the sidebar docked down to 992px instead.
+
+   What remains below is only what is still referenced by pages not
+   yet migrated to the design system. Each rule notes its consumer,
+   so it is obvious when it can be deleted.
+   ============================================================ */
+
+/* admin/profile.php — avatar block */
+.avatar-container {
+    text-align: center;
+    margin-bottom: 20px;
+    padding-top: 10px;
+}
+
+/* admin/manage-users.php — status switch row */
+.toggle-status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}

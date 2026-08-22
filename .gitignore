@@ -1,0 +1,25 @@
+# Claude Code session/tooling state - not part of the application
+.claude/
+
+# Editor config
+.phcode.json
+
+# Uploaded content is user data, not source - keep the folders (the app
+# expects them to exist) but not what's actually been uploaded to this
+# local install.
+assets/uploads/shop_products/*
+!assets/uploads/shop_products/.gitkeep
+assets/uploads/profile_admin/*
+!assets/uploads/profile_admin/.gitkeep
+assets/uploads/po_invoices/*
+!assets/uploads/po_invoices/.gitkeep
+assets/uploads/shop_logo/*
+!assets/uploads/shop_logo/.gitkeep
+
+# OS cruft
+Thumbs.db
+.DS_Store
+
+# Screenshots capture live-install data (real names, stale branding) -
+# excluded until they're recaptured against a clean/rebranded install.
+docs/screenshots/

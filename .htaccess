@@ -1,0 +1,61 @@
+# Enable Rewrite Engine
+RewriteEngine On
+
+# ------------------------------------------------------------------
+# Clean role routes
+# ------------------------------------------------------------------
+# Each role lands on one of these after signing in (see roleHomeUrl()
+# in includes/auth.php). They are shortcuts TO the real admin/ pages.
+#
+# THEY REDIRECT (R=302). THEY MUST NOT REWRITE INTERNALLY.
+#
+# A rewrite keeps the browser's address at, say, /Home/inventory while
+# the file answering is admin/inventory-dashboard.php. The browser then
+# resolves every relative link on that page against /Home/ - so the
+# sidebar's "inventory-items.php" became /Home/inventory-items.php and
+# 404ed. That broke the ENTIRE navigation for any role landing on a
+# clean URL, and left a cashier with no working way out of the till:
+# Exit POS went to /Home/pos/pos.php, the receipt to
+# /Home/pos/pos-receipt.php, and the 404 page's own "Back to Home" to
+# /Home/pos/index.php. All three 404s are in the access log.
+#
+# Redirecting instead means the address bar always holds the real path,
+# so every relative link, form action and asset URL on all 38 admin
+# pages resolves correctly - without having to rewrite hundreds of
+# hrefs and keep future ones in line.
+#
+# The clean URLs still work as bookmarks and are still what login
+# forwards to; they simply hand over to the real page. Placed above the
+# catch-all 404 rule so they take priority.
+# ------------------------------------------------------------------
+# An external redirect needs a URL path, not a filesystem-relative one,
+# and this app may be served from a subdirectory (/Home/ here) or from
+# the root. This is the standard Apache idiom for discovering the
+# directory the .htaccess is running in: compare the full request URI
+# with the already-stripped per-directory path, and keep the prefix.
+RewriteCond %{REQUEST_URI}::$1 ^(.*?/)(.*)::\2$
+RewriteRule ^(.*)$ - [E=BASE:%1]
+
+RewriteRule ^admin/dashboard/?$    %{ENV:BASE}admin/index.php               [R=302,L,QSA]
+RewriteRule ^manager/overview/?$   %{ENV:BASE}admin/manager-overview.php    [R=302,L,QSA]
+RewriteRule ^inventory/?$          %{ENV:BASE}admin/inventory-dashboard.php [R=302,L,QSA]
+RewriteRule ^pos/terminal/?$       %{ENV:BASE}admin/pos.php                 [R=302,L,QSA]
+
+# Convenience aliases
+RewriteRule ^login/?$              %{ENV:BASE}admin/login.php               [R=302,L,QSA]
+RewriteRule ^pos/sales/?$          %{ENV:BASE}admin/pos-sales.php           [R=302,L,QSA]
+RewriteRule ^accounting/?$         %{ENV:BASE}admin/accounting-dashboard.php [R=302,L,QSA]
+
+# The site root is a staff application - send visitors to the login
+# portal, which forwards signed-in users to their own home screen.
+RewriteRule ^$ admin/login.php [L]
+
+# Redirect all other invalid URLs to notfound.php. The target is
+# relative so it resolves correctly when the app is served from a
+# subdirectory (e.g. http://localhost:8081/Home/).
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^(.*)$ notfound.php [L]
+
+# Prevent directory listing
+Options -Indexes
