@@ -434,6 +434,7 @@ function posCheckout(
         if ($txnId <= 0) { throw new Exception('Could not save the sale. Please try again.'); }
 
         // ---- Lines + stock deduction ------------------------------------
+        require_once __DIR__ . '/inv_batches_functions.php';
         $lineStmt = $conn->prepare("INSERT INTO sales_transaction_items
             (transaction_id, item_id, item_name, barcode, department, quantity, unit_price, unit_cost, line_discount, line_total)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
@@ -442,14 +443,40 @@ function posCheckout(
                 $txnId, $r['item_id'], $r['name'], $r['barcode'], $r['department'],
                 $r['qty'], $r['price'], $r['cost'], $r['discount'], $r['total']);
             if (!$lineStmt->execute()) { throw new Exception('Could not save the sale items.'); }
+            $saleItemId = (int)$conn->insert_id;
 
-            // Deduct through the shared audit trail (ownTransaction=false:
-            // we are already inside this transaction).
-            [$ok, $msg] = recordStockMovement(
-                $conn, $r['item_id'], 'issue', -$r['qty'], $cashierId,
-                'POS sale ' . $receiptNo, 0.0, null, 'pos_sale', $txnId, false
-            );
-            if (!$ok) { throw new Exception($r['name'] . ': ' . $msg); }
+            // FEFO first: deduct from the oldest active batch(es) and remember
+            // exactly which batches this line consumed so voids can re-credit them.
+            $fefo = deductFefoBatches($conn, (int)$r['item_id'], (float)$r['qty']);
+            if ($fefo['ok'] && $fefo['allocations']) {
+                $batchStmt = $conn->prepare("INSERT INTO sales_transaction_item_batches
+                    (sale_item_id, batch_id, qty, unit_cost) VALUES (?, ?, ?, ?)");
+                foreach ($fefo['allocations'] as $alloc) {
+                    [$ok, $msg] = recordStockMovement(
+                        $conn, (int)$r['item_id'], 'issue', -(float)$alloc['qty'], $cashierId,
+                        'POS sale ' . $receiptNo, 0.0, null, 'pos_sale', $txnId, false, (int)$alloc['batch_id']
+                    );
+                    if (!$ok) { throw new Exception($r['name'] . ': ' . $msg); }
+
+                    $batchId = (int)$alloc['batch_id'];
+                    $qty = (float)$alloc['qty'];
+                    $unitCost = (float)$alloc['unit_cost'];
+                    $batchStmt->bind_param('iidd', $saleItemId, $batchId, $qty, $unitCost);
+                    if (!$batchStmt->execute()) { throw new Exception('Could not save the sale batch details.'); }
+                }
+                $batchStmt->close();
+            } else {
+                // Legacy or gap fallback: the till must not refuse a sale just
+                // because batch rows are missing. Deduct the blended item stock.
+                if (!$fefo['ok']) {
+                    error_log('FEFO fallback for item ' . (int)$r['item_id'] . ' on sale ' . $receiptNo . ': ' . $fefo['message']);
+                }
+                [$ok, $msg] = recordStockMovement(
+                    $conn, $r['item_id'], 'issue', -$r['qty'], $cashierId,
+                    'POS sale ' . $receiptNo, 0.0, null, 'pos_sale', $txnId, false
+                );
+                if (!$ok) { throw new Exception($r['name'] . ': ' . $msg); }
+            }
         }
         $lineStmt->close();
 
@@ -513,18 +540,41 @@ function posVoidSale(mysqli $conn, int $txnId, ?int $userId, string $reason = ''
         if (!$txn) { throw new Exception('Sale not found.'); }
         if ($txn['status'] === 'voided') { $conn->commit(); return [true, 'This sale was already voided.']; }
 
-        $lstmt = $conn->prepare("SELECT item_id, item_name, quantity FROM sales_transaction_items WHERE transaction_id = ?");
+        $lstmt = $conn->prepare("SELECT id, item_id, item_name, quantity FROM sales_transaction_items WHERE transaction_id = ?");
         $lstmt->bind_param('i', $txnId);
         $lstmt->execute();
         $lines = $lstmt->get_result()->fetch_all(MYSQLI_ASSOC);
         $lstmt->close();
 
+        require_once __DIR__ . '/inv_batches_functions.php';
         foreach ($lines as $l) {
-            [$ok, $msg] = recordStockMovement(
-                $conn, (int)$l['item_id'], 'return', (float)$l['quantity'], $userId,
-                'Void of POS sale ' . $txn['receipt_no'], 0.0, null, 'pos_sale', $txnId, false
-            );
-            if (!$ok) { throw new Exception($l['item_name'] . ': ' . $msg); }
+            $saleItemId = (int)$l['id'];
+            // Check if this sale line has batch attribution.
+            $bstmt = $conn->prepare("SELECT batch_id, qty, unit_cost FROM sales_transaction_item_batches WHERE sale_item_id = ?");
+            $bstmt->bind_param('i', $saleItemId);
+            $bstmt->execute();
+            $batchRows = $bstmt->get_result()->fetch_all(MYSQLI_ASSOC);
+            $bstmt->close();
+
+            if ($batchRows) {
+                // Re-credit the exact batches this sale consumed.
+                creditFefoBatches($conn, $batchRows);
+
+                foreach ($batchRows as $br) {
+                    [$ok, $msg] = recordStockMovement(
+                        $conn, (int)$l['item_id'], 'return', (float)$br['qty'], $userId,
+                        'Void of POS sale ' . $txn['receipt_no'], 0.0, null, 'pos_sale', $txnId, false, (int)$br['batch_id']
+                    );
+                    if (!$ok) { throw new Exception($l['item_name'] . ': ' . $msg); }
+                }
+            } else {
+                // No batch attribution (legacy sale or fallback): return via the old path.
+                [$ok, $msg] = recordStockMovement(
+                    $conn, (int)$l['item_id'], 'return', (float)$l['quantity'], $userId,
+                    'Void of POS sale ' . $txn['receipt_no'], 0.0, null, 'pos_sale', $txnId, false
+                );
+                if (!$ok) { throw new Exception($l['item_name'] . ': ' . $msg); }
+            }
         }
 
         // Reverse the money side too, or the day's takings would still

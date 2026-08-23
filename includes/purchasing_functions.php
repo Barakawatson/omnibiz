@@ -105,6 +105,14 @@ function poReceiveStock(mysqli $conn, int $poId, array $quantities, ?int $userId
             );
             if (!$ok) { throw new Exception($msg); }
 
+            // Store the line data for batch creation after receipt ID is available.
+            $receivedLines[] = [
+                'item_id' => (int)$ln['item_id'],
+                'line_id' => (int)$ln['id'],
+                'qty' => $take,
+                'unit_price' => $unitPrice,
+            ];
+
             $upd = $conn->prepare("UPDATE inv_purchase_order_lines SET received_qty = received_qty + ? WHERE id = ?");
             $upd->bind_param('di', $take, $ln['id']);
             $upd->execute();
@@ -128,6 +136,18 @@ function poReceiveStock(mysqli $conn, int $poId, array $quantities, ?int $userId
         if (!$ins->execute()) { $ins->close(); throw new Exception('Could not save the goods receipt.'); }
         $receiptId = (int)$conn->insert_id;
         $ins->close();
+
+        // Create batches for each received line (now that receipt ID is available).
+        require_once __DIR__ . '/inv_batches_functions.php';
+        foreach ($receivedLines as $rl) {
+            $batchNo = 'PO-' . $po['po_number'] . '-L' . $rl['line_id'];
+            [$bOk, $bMsg, $batchId] = createBatch(
+                $conn, $rl['item_id'], $batchNo, $rl['qty'], $rl['unit_price'],
+                null, 'purchase_order', $receiptId
+            );
+            // Non-fatal: if batch creation fails, the stock movement still succeeded.
+            if (!$bOk) { error_log("Batch creation failed for PO line {$rl['line_id']}: $bMsg"); }
+        }
 
         // The ledger half. Inside this transaction on purpose.
         [$accOk, $accMsg, $journalId] = accPostGoodsReceipt(

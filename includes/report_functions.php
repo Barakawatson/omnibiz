@@ -99,6 +99,7 @@ function reportCatalogue(): array {
             'reports' => [
                 ['valuation',    'Stock valuation',      'Every item at weighted-average cost.'],
                 ['low_stock',    'Low & out of stock',   'What needs reordering, against its own reorder level.'],
+                ['batches',      'Batch tracking',       'Stock by batch, oldest expiry first.'],
                 ['movements',    'Stock movements',      'The full audit trail of every change.'],
                 ['most_consumed','Most consumed',        'What leaves the shelf fastest.'],
                 ['slow_moving',  'Slow-moving items',    'Stock that is not turning over.'],

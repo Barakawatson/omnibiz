@@ -349,9 +349,9 @@ case 'inventory.valuation':
         $val  = (float)$r['current_stock'] * $cost;
         $tQ += (float)$r['current_stock']; $tV += $val;
         [$lbl, $tone] = invStockStatus($r);
-        // Drill-down: an item opens its movement history.
+        // Drill-down: an item opens its batch breakdown (FEFO order).
         $rows[] = [['text'=>$r['name'],
-                    'href'=>'report.php?g=inventory&r=movements&preset=this_year&item=' . (int)$r['id']],
+                    'href'=>'report.php?g=inventory&r=batches&item=' . (int)$r['id']],
                    $r['sku'] ?: '—', $r['cat'] ?: '—', catalogDepartmentLabel($r['department']),
                    q($r['current_stock']), $r['unit'] ?: '', m($cost), m($val),
                    ['text'=>$lbl, 'badge'=>$tone==='danger'?'danger':($tone==='warning'?'warning':'success')]];
@@ -383,7 +383,7 @@ case 'inventory.low_stock':
         // The gap to the shop's OWN reorder level - not an invented one.
         $short = max(0, (float)$r['reorder_level'] - (float)$r['current_stock']);
         $rows[] = [['text'=>$r['name'],
-                    'href'=>'report.php?g=inventory&r=movements&preset=this_year&item=' . (int)$r['id']],
+                    'href'=>'report.php?g=inventory&r=batches&item=' . (int)$r['id']],
                    $r['sku'] ?: '—', $r['cat'] ?: '—',
                    q($r['current_stock']), q($r['min_stock']), q($r['reorder_level']),
                    $short > 0 ? q($short) : '—', m((float)$r['current_stock'] * $cost),
@@ -392,6 +392,44 @@ case 'inventory.low_stock':
     $metrics = [['Out of stock', number_format($out), 'cannot be sold', $out?'is-bad':'is-good'],
                 ['Low stock', number_format($low), 'at or below reorder level', $low?'is-warn':'is-good'],
                 ['Value still on shelf','Tsh ' . m($tV),'','']];
+    break;
+
+case 'inventory.batches':
+    $supports = ['dept','category','item'];
+    $columns = ['Item','Batch No','Qty','Unit Cost','Value','Expiry Date','Status'];
+    $align = [2=>1,3=>1,4=>1];
+    $w = "i.deleted_at IS NULL AND i.status='active' AND b.status='active' AND b.quantity > 0"; $ty=''; $pa=[];
+    if ($fDept !== '')     { $w .= " AND i.department = ?"; $ty.='s'; $pa[]=$fDept; }
+    if ($fCategory > 0)    { $w .= " AND i.category_id = ?"; $ty.='i'; $pa[]=$fCategory; }
+    if ($fItem > 0)        { $w .= " AND i.id = ?"; $ty.='i'; $pa[]=$fItem; }
+    [$rows_raw, $totalRows] = rqPaged($conn,
+        "SELECT b.id, b.batch_no, b.quantity, b.unit_cost, b.expiry_date, b.status,
+                i.id AS item_id, i.name AS item_name, c.name AS cat
+         FROM inv_batches b
+         JOIN inv_items i ON i.id = b.item_id
+         LEFT JOIN inv_categories c ON c.id = i.category_id
+         WHERE $w ORDER BY (b.expiry_date IS NULL) ASC, b.expiry_date ASC, b.id ASC",
+        $ty, $pa, $page, $perPage, $isExport, $exportCap);
+    $tQ=0; $tV=0; $expiringSoon=0;
+    foreach ($rows_raw as $r) {
+        $val = (float)$r['quantity'] * (float)$r['unit_cost'];
+        $tQ += (float)$r['quantity']; $tV += $val;
+        $exp = $r['expiry_date'];
+        if ($exp && strtotime($exp) <= strtotime('+7 days')) { $expiringSoon++; }
+        $rows[] = [['text'=>$r['item_name'],
+                    'href'=>'report.php?g=inventory&r=batches&item=' . (int)$r['item_id']],
+                   $r['batch_no'] ?: '—',
+                   q($r['quantity']),
+                   m($r['unit_cost']),
+                   m($val),
+                   $exp ? date('d M Y', strtotime($exp)) : '—',
+                   ['text'=>ucfirst($r['status']), 'badge'=>$r['status']==='active'?'success':'secondary']];
+    }
+    $footer = ['Total','', q($tQ), '', m($tV), '', ''];
+    $metrics = [['Active batches', number_format(count($rows_raw)), '', ''],
+                ['Total qty', q($tQ), '', ''],
+                ['Batch value', 'Tsh ' . m($tV), '', ''],
+                ['Expiring within 7 days', number_format($expiringSoon), '', $expiringSoon?'is-warn':'']];
     break;
 
 case 'inventory.movements':
