@@ -667,6 +667,37 @@ function posStockIn(mysqli $conn, int $itemId, float $qty, ?int $userId, string 
         );
         if (!$ok) { throw new Exception($msg); }
 
+        // Maintain the batch invariant: any stock added here needs a batch
+        // row, or current_stock drifts from SUM(active batches) and FEFO
+        // falls back at the till.
+        require_once __DIR__ . '/inv_batches_functions.php';
+        if ($delta > 0) {
+            // Adding stock: create a batch. The barcode station doesn't
+            // capture expiry dates, so this batch sorts last in FEFO.
+            $batchCost = $unitCost > 0 ? $unitCost : 0.0;
+            if ($batchCost <= 0) {
+                $costStmt = $conn->prepare("SELECT average_cost, purchase_price FROM inv_items WHERE id = ?");
+                $costStmt->bind_param('i', $itemId);
+                $costStmt->execute();
+                $costRow = $costStmt->get_result()->fetch_assoc();
+                $costStmt->close();
+                $batchCost = (float)($costRow['average_cost'] > 0 ? $costRow['average_cost'] : $costRow['purchase_price']);
+            }
+            [$bOk, $bMsg, $batchId] = createBatch(
+                $conn, $itemId, null, $delta, $batchCost, null, 'barcode_station', null
+            );
+            if (!$bOk) { error_log("Batch creation failed for barcode stock-in of item {$itemId}: $bMsg"); }
+        } elseif ($delta < 0) {
+            // Removing stock (physical count lower than system): deduct from
+            // batches FEFO-style so the batch invariant holds. If batches
+            // can't cover (gap), the stock movement already happened and
+            // the drift is logged at checkout.
+            $fefo = deductFefoBatches($conn, $itemId, abs($delta));
+            if (!$fefo['ok']) {
+                error_log("FEFO deduction failed for barcode count adjustment of item {$itemId}: {$fefo['message']}");
+            }
+        }
+
         $conn->commit();
         return [true, $item['name'] . ': ' . ($mode === 'set' ? 'adjusted to ' : 'stock now ') . invQty($after) . '.', $after];
     } catch (Throwable $e) {
