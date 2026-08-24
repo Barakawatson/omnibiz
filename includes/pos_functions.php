@@ -402,6 +402,45 @@ function posCheckout(
             if ($custId <= 0) { $custId = null; }
         }
 
+        // ---- Institutional details (organisation / government customer) --
+        // Merge anything newly typed into the stored customer record -
+        // never overwrite a stored value with a blank one, so leaving a
+        // field empty on a later visit doesn't erase what was captured
+        // before. The sale then snapshots the EFFECTIVE (post-merge)
+        // values, never a live join, so an edit to the customer record
+        // later can never rewrite an old receipt.
+        $newAddress = trim((string)($customer['address'] ?? ''));
+        $newTin     = trim((string)($customer['tin'] ?? ''));
+        $newEmail   = trim((string)($customer['email'] ?? ''));
+        $effAddress = $newAddress;
+        $effTin     = $newTin;
+        $effEmail   = $newEmail;
+        if ($custId) {
+            $cStmt = $conn->prepare("SELECT address, tin, email FROM customer WHERE id = ?");
+            $cStmt->bind_param('i', $custId);
+            $cStmt->execute();
+            $stored = $cStmt->get_result()->fetch_assoc() ?: [];
+            $cStmt->close();
+
+            if ($newAddress === '') { $effAddress = (string)($stored['address'] ?? ''); }
+            if ($newTin === '')     { $effTin     = (string)($stored['tin'] ?? ''); }
+            if ($newEmail === '')   { $effEmail   = (string)($stored['email'] ?? ''); }
+
+            if ($newAddress !== '' || $newTin !== '' || $newEmail !== '') {
+                $uStmt = $conn->prepare("UPDATE customer SET
+                    address = IF(? <> '', ?, address),
+                    tin     = IF(? <> '', ?, tin),
+                    email   = IF(? <> '', ?, email)
+                    WHERE id = ?");
+                $uStmt->bind_param('ssssssi', $newAddress, $newAddress, $newTin, $newTin, $newEmail, $newEmail, $custId);
+                $uStmt->execute();
+                $uStmt->close();
+            }
+        }
+        $snapAddress = $effAddress !== '' ? $effAddress : null;
+        $snapTin     = $effTin !== ''     ? $effTin     : null;
+        $snapEmail   = $effEmail !== ''   ? $effEmail   : null;
+
         // ---- Header row (retry once on receipt-number collision) ---------
         $receiptNo = '';
         $txnId = 0;
@@ -411,15 +450,18 @@ function posCheckout(
             $ins = $conn->prepare("INSERT INTO sales_transactions
                 (receipt_no, terminal_id, department, cashier_id, cashier_name,
                  customer_type, customer_id, customer_name, customer_phone,
+                 customer_tin, customer_address, customer_email,
                  subtotal, discount, tax_rate, tax_amount, total, total_cost, gross_profit,
                  amount_paid, change_due, payment_method, note)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
             // receipt(s) terminal(i) dept(s) cashier_id(i) cashier(s)
             // cust_type(s) cust_id(i) cust_name(s) cust_phone(s)
-            // then 9 decimals, then method(s) note(s) = 20 parameters.
-            $ins->bind_param('sisississdddddddddss',
+            // cust_tin(s) cust_address(s) cust_email(s)
+            // then 9 decimals, then method(s) note(s) = 23 parameters.
+            $ins->bind_param('sisississsssdddddddddss',
                 $receiptNo, $terminalIdVal, $saleDepartment, $cashierId, $cashierName,
                 $custType, $custId, $custName, $custPhone,
+                $snapTin, $snapAddress, $snapEmail,
                 $subtotal, $orderDiscount, $taxRate, $taxAmount, $total, $totalCost, $grossProfit,
                 $amountPaid, $changeDue, $method, $note);
             if ($ins->execute()) {

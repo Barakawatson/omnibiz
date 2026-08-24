@@ -124,6 +124,18 @@ function rMoney($v) { return number_format((float)$v); }
         <?php if ($sale['customer_phone']): ?>
         <tr><td></td><td class="right"><?php echo htmlspecialchars($sale['customer_phone']); ?></td></tr>
         <?php endif; ?>
+        <?php // Institutional details - present only when this sale actually
+              // captured them, so an old receipt (predating this feature,
+              // or a plain walk-in) renders exactly as it did before. ?>
+        <?php if (!empty($sale['customer_address'])): ?>
+        <tr><td></td><td class="right"><?php echo htmlspecialchars($sale['customer_address']); ?></td></tr>
+        <?php endif; ?>
+        <?php if (!empty($sale['customer_tin'])): ?>
+        <tr><td>TIN</td><td class="right"><?php echo htmlspecialchars($sale['customer_tin']); ?></td></tr>
+        <?php endif; ?>
+        <?php if (!empty($sale['customer_email'])): ?>
+        <tr><td></td><td class="right"><?php echo htmlspecialchars($sale['customer_email']); ?></td></tr>
+        <?php endif; ?>
         <?php else: ?>
         <tr><td>Customer</td><td class="right">Walk-in</td></tr>
         <?php endif; ?>

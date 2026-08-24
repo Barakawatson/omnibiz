@@ -54,8 +54,13 @@
 // of a gap across the whole pre-existing catalogue. inv_disposal_request_lines
 // gains a nullable batch_id so disposal can target one specific batch
 // instead of an item's blended stock (see Milestone 5 of the plan).
+// v7: `inv_po_payments.efd_receipt_file`. Recording the payment that
+// fully settles a purchase order now requires the supplier's TRA EFD
+// receipt to be attached first - see poRecordPayment(). A partial
+// payment may still carry one if the cashier has it, but isn't blocked
+// without it; only the payment that zeroes the outstanding balance is.
 if (!defined('INV_SCHEMA_VERSION')) {
-    define('INV_SCHEMA_VERSION', '6');
+    define('INV_SCHEMA_VERSION', '7');
 }
 
 /**
@@ -296,6 +301,7 @@ function ensureInventorySchema(mysqli $conn): void {
         `paid_from_account_id` INT(11) NOT NULL,
         `payment_date` DATE NOT NULL,
         `reference` VARCHAR(120) DEFAULT NULL,
+        `efd_receipt_file` VARCHAR(255) DEFAULT NULL,
         `journal_id` INT(11) DEFAULT NULL,
         `paid_by` INT(11) DEFAULT NULL,
         `paid_by_name` VARCHAR(100) DEFAULT NULL,
@@ -448,6 +454,16 @@ function ensureInventorySchema(mysqli $conn): void {
                 ADD COLUMN `reference_id` INT(11) DEFAULT NULL AFTER `reference_type`,
                 ADD KEY `idx_inv_batch_expiry` (`expiry_date`),
                 ADD KEY `idx_inv_batch_item_status` (`item_id`, `status`)");
+        }
+        $col->free();
+    }
+
+    // --- v6 -> v7: EFD receipt attachment on a supplier payment ------------
+    $col = @$conn->query("SHOW COLUMNS FROM `inv_po_payments` LIKE 'efd_receipt_file'");
+    if ($col instanceof mysqli_result) {
+        if ($col->num_rows === 0) {
+            @$conn->query("ALTER TABLE `inv_po_payments`
+                ADD COLUMN `efd_receipt_file` VARCHAR(255) DEFAULT NULL AFTER `reference`");
         }
         $col->free();
     }

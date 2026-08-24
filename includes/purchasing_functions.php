@@ -210,7 +210,8 @@ function poRecordPayment(
     string $paymentDate,
     string $reference,
     ?int $userId,
-    string $userName
+    string $userName,
+    ?string $efdReceiptFile = null
 ): array {
     $amount = round($amount, 2);
     if ($amount <= 0) { return [false, 'Enter an amount greater than zero.', 0]; }
@@ -232,17 +233,25 @@ function poRecordPayment(
         return [false, 'That is more than the ' . number_format($summary['outstanding'], 2)
                      . ' still outstanding on this order.', 0];
     }
+    // A payment that fully settles the order requires the supplier's TRA
+    // EFD receipt on file first - a partial/interim payment may still
+    // carry one, but isn't blocked without it. Checked before the
+    // transaction opens, so nothing is written on a rejection.
+    if ($amount >= $summary['outstanding'] - 0.005 && ($efdReceiptFile === null || $efdReceiptFile === '')) {
+        return [false, "Attach the supplier's EFD receipt to record the final payment on this order.", 0];
+    }
 
     $conn->begin_transaction();
     try {
         $paymentNo = poNextPaymentNo($conn);
         $refVal = trim($reference) ?: null;
 
+        $efdVal = ($efdReceiptFile !== null && $efdReceiptFile !== '') ? $efdReceiptFile : null;
         $ins = $conn->prepare("INSERT INTO inv_po_payments
-            (po_id, payment_no, amount, paid_from_account_id, payment_date, reference, paid_by, paid_by_name)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
-        $ins->bind_param('isdissis', $poId, $paymentNo, $amount, $paidFromAccountId,
-                         $paymentDate, $refVal, $userId, $userName);
+            (po_id, payment_no, amount, paid_from_account_id, payment_date, reference, efd_receipt_file, paid_by, paid_by_name)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        $ins->bind_param('isdisssis', $poId, $paymentNo, $amount, $paidFromAccountId,
+                         $paymentDate, $refVal, $efdVal, $userId, $userName);
         if (!$ins->execute()) { $ins->close(); throw new Exception('Could not save the payment.'); }
         $paymentId = (int)$conn->insert_id;
         $ins->close();

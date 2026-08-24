@@ -72,18 +72,38 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         invFlash('success', 'Purchase order cancelled.');
     }
     elseif ($action === 'payment') {
-        // A payment is money actually leaving an account, so it needs an
-        // amount and a source - it is no longer a status you can simply
-        // declare. payment_status is derived from what was recorded.
-        [$ok, $msg] = poRecordPayment(
-            $conn, $poId,
-            (float)($_POST['amount'] ?? 0),
-            (int)($_POST['paid_from_account_id'] ?? 0),
-            $_POST['payment_date'] ?? date('Y-m-d'),
-            trim($_POST['reference'] ?? ''),
-            $userId, $userName
-        );
-        invFlash($ok ? 'success' : 'danger', $msg);
+        // If an EFD receipt was attached, validate and store it BEFORE
+        // touching money - so a bad file never leaves a payment half
+        // recorded. poRecordPayment() decides whether one was actually
+        // required (only the payment that fully settles the order needs
+        // it); if it still refuses for that or any other reason, the
+        // just-stored file is deleted so nothing orphans.
+        $efdDir = __DIR__ . '/../assets/uploads/efd_receipts';
+        $efdFile = null;
+        $efdUploadError = null;
+        if (!empty($_FILES['efd_receipt']['name'])) {
+            [$efdOk, $efdResult] = uploadStoreDocument($_FILES['efd_receipt'], $efdDir, 'efd_po' . $poId);
+            if ($efdOk) { $efdFile = $efdResult; } else { $efdUploadError = $efdResult; }
+        }
+
+        if ($efdUploadError !== null) {
+            invFlash('danger', $efdUploadError);
+        } else {
+            // A payment is money actually leaving an account, so it needs an
+            // amount and a source - it is no longer a status you can simply
+            // declare. payment_status is derived from what was recorded.
+            [$ok, $msg] = poRecordPayment(
+                $conn, $poId,
+                (float)($_POST['amount'] ?? 0),
+                (int)($_POST['paid_from_account_id'] ?? 0),
+                $_POST['payment_date'] ?? date('Y-m-d'),
+                trim($_POST['reference'] ?? ''),
+                $userId, $userName,
+                $efdFile
+            );
+            if (!$ok && $efdFile !== null) { uploadDeleteFile($efdDir, $efdFile); }
+            invFlash($ok ? 'success' : 'danger', $msg);
+        }
     }
     elseif ($action === 'invoice' && isset($_FILES['invoice'])) {
         // Validated by content, not by the name the browser sent, and
@@ -273,6 +293,9 @@ include 'inventory-header.php';
                     <?php if ($pay['journal_id']): ?>
                     <a href="journal-entry.php?id=<?php echo (int)$pay['journal_id']; ?>" style="font-size:.7rem;text-decoration:none;color:var(--inv-primary);">ledger</a>
                     <?php endif; ?>
+                    <?php if (!empty($pay['efd_receipt_file'])): ?>
+                    <br><a href="../assets/uploads/efd_receipts/<?php echo htmlspecialchars($pay['efd_receipt_file']); ?>" target="_blank" style="font-size:.7rem;text-decoration:none;color:var(--inv-primary);">EFD receipt</a>
+                    <?php endif; ?>
                 </div>
             </div>
             <?php endforeach; ?>
@@ -373,7 +396,7 @@ include 'inventory-header.php';
 <div class="modal fade" id="payModal" tabindex="-1">
     <div class="modal-dialog modal-dialog-centered">
         <div class="modal-content">
-            <form method="post">
+            <form method="post" enctype="multipart/form-data">
 <?php echo csrfField(); ?>
                 <input type="hidden" name="action" value="payment">
                 <input type="hidden" name="po_id" value="<?php echo $poId; ?>">
@@ -391,8 +414,9 @@ include 'inventory-header.php';
                         <div class="col-6">
                             <label class="form-label">Amount</label>
                             <input type="number" step="0.01" min="0.01" max="<?php echo $money['outstanding']; ?>"
-                                   name="amount" class="form-control" required
-                                   value="<?php echo number_format($money['outstanding'], 2, '.', ''); ?>">
+                                   name="amount" id="payAmount" class="form-control" required
+                                   value="<?php echo number_format($money['outstanding'], 2, '.', ''); ?>"
+                                   data-outstanding="<?php echo number_format($money['outstanding'], 2, '.', ''); ?>">
                             <div class="form-text">Outstanding: <?php echo number_format($money['outstanding'], 2); ?></div>
                         </div>
                         <div class="col-6">
@@ -416,6 +440,12 @@ include 'inventory-header.php';
                             <input type="text" name="reference" class="form-control" maxlength="120"
                                    placeholder="e.g. Mobile money transaction ID">
                         </div>
+                        <div class="col-12">
+                            <label class="form-label" id="payEfdLabel">Supplier's EFD receipt</label>
+                            <input type="file" name="efd_receipt" id="payEfdReceipt" class="form-control"
+                                   accept=".pdf,.jpg,.jpeg,.png,.webp">
+                            <div class="form-text" id="payEfdHint">Required to record the final payment on this order.</div>
+                        </div>
                     </div>
                 </div>
                 <div class="modal-footer">
@@ -426,6 +456,27 @@ include 'inventory-header.php';
         </div>
     </div>
 </div>
+<script>
+// Pure UX signal: the server-side check in poRecordPayment() is the
+// actual control, this just tells the cashier up front whether the
+// receipt is required for the amount they've typed.
+(function() {
+    const amt = document.getElementById('payAmount');
+    const efd = document.getElementById('payEfdReceipt');
+    const hint = document.getElementById('payEfdHint');
+    if (!amt || !efd) { return; }
+    function sync() {
+        const outstanding = parseFloat(amt.dataset.outstanding) || 0;
+        const isFinal = (parseFloat(amt.value) || 0) >= outstanding - 0.005;
+        efd.required = isFinal;
+        hint.textContent = isFinal
+            ? 'Required to record the final payment on this order.'
+            : 'Optional for a partial payment.';
+    }
+    amt.addEventListener('input', sync);
+    sync();
+})();
+</script>
 <?php endif; ?>
 
 <?php include 'inventory-footer.php'; ?>

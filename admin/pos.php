@@ -1132,7 +1132,16 @@ $tillStmt->close();
 
             <div id="custFields" style="display:none;padding:8px 14px;border-bottom:1px solid #eef1f4;">
                 <input type="text" id="custPhone" class="form-control form-control-sm mb-1" placeholder="Customer phone (identity)" style="border-radius:8px;">
-                <input type="text" id="custName" class="form-control form-control-sm" placeholder="Customer name" style="border-radius:8px;">
+                <input type="text" id="custName" class="form-control form-control-sm mb-1" placeholder="Customer name" style="border-radius:8px;">
+                <!-- Institutional customers (organisations, government entities) -
+                     printed on the receipt when filled in. Optional for everyone
+                     else, so a normal walk-in registered customer needs only the
+                     two fields above. -->
+                <input type="text" id="custAddress" class="form-control form-control-sm mb-1" placeholder="Address (optional)" style="border-radius:8px;">
+                <div class="d-flex gap-1">
+                    <input type="text" id="custTin" class="form-control form-control-sm" placeholder="TIN (optional)" style="border-radius:8px;">
+                    <input type="email" id="custEmail" class="form-control form-control-sm" placeholder="Email (optional)" style="border-radius:8px;">
+                </div>
             </div>
 
             <div class="cart-lines" id="cartLines">
@@ -1856,6 +1865,27 @@ document.getElementById('custType').addEventListener('change', function() {
     document.getElementById('custFields').style.display = this.value === 'registered' ? 'block' : 'none';
 });
 
+// Look an existing registered customer up by phone and autofill their
+// stored details - still editable afterward, so typing over an
+// autofilled field (e.g. a new TIN) is what updates the stored record
+// at checkout. Never overwrites what the cashier has already typed.
+document.getElementById('custPhone').addEventListener('blur', function() {
+    const phone = this.value.trim();
+    if (!phone) return;
+    fetch('api/customer-lookup.php?phone=' + encodeURIComponent(phone), { credentials: 'same-origin' })
+        .then(r => r.json())
+        .then(d => {
+            if (!d.ok || !d.found) return;
+            const c = d.customer;
+            const fill = (id, val) => { const el = document.getElementById(id); if (el && !el.value && val) el.value = val; };
+            fill('custName', c.name);
+            fill('custAddress', c.address);
+            fill('custTin', c.tin);
+            fill('custEmail', c.email);
+        })
+        .catch(() => {});
+});
+
 // ---------------------------------------------------------------
 // Hold / clear / complete
 // ---------------------------------------------------------------
@@ -1926,7 +1956,10 @@ document.getElementById('completeBtn').addEventListener('click', () => {
             customer: {
                 type: document.getElementById('custType').value,
                 name: document.getElementById('custName').value,
-                phone: document.getElementById('custPhone').value
+                phone: document.getElementById('custPhone').value,
+                address: document.getElementById('custAddress').value,
+                tin: document.getElementById('custTin').value,
+                email: document.getElementById('custEmail').value
             }
         })
     })
@@ -1950,6 +1983,9 @@ document.getElementById('completeBtn').addEventListener('click', () => {
         document.getElementById('custFields').style.display = 'none';
         document.getElementById('custName').value = '';
         document.getElementById('custPhone').value = '';
+        document.getElementById('custAddress').value = '';
+        document.getElementById('custTin').value = '';
+        document.getElementById('custEmail').value = '';
         // Refresh stock badges after a short pause so the next sale sees
         // accurate numbers.
         setTimeout(() => location.reload(), 1500);

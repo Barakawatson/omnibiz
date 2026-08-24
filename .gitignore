@@ -13,6 +13,8 @@ assets/uploads/profile_admin/*
 !assets/uploads/profile_admin/.gitkeep
 assets/uploads/po_invoices/*
 !assets/uploads/po_invoices/.gitkeep
+assets/uploads/efd_receipts/*
+!assets/uploads/efd_receipts/.gitkeep
 assets/uploads/shop_logo/*
 !assets/uploads/shop_logo/.gitkeep
 

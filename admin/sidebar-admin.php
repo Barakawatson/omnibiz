@@ -81,7 +81,7 @@ if (!defined('MX_UI_ASSETS_EMITTED')) {
     // itself server-side (see navSectionOpen). Keep in sync when adding
     // a page - a page missing here simply won't auto-expand its section.
     $secPages = [
-        'sales'      => ['pos.php','pos-sales.php','pos-receipt.php','retail-products.php','manage-customers.php'],
+        'sales'      => ['pos.php','pos-sales.php','pos-receipt.php','retail-products.php','manage-customers.php','expiry-alerts.php'],
         'inventory'  => ['inventory-dashboard.php','inventory-items.php','barcode-station.php',
                          'barcode-labels.php','inventory-requests.php','inventory-movements.php',
                          'inventory-purchase-orders.php','inventory-po-view.php','inventory-suppliers.php',
@@ -169,10 +169,13 @@ if (!defined('MX_UI_ASSETS_EMITTED')) {
             <?php if (userCan('customers')): ?>
                 <?php echo navLink('manage-customers.php', 'fa-users', 'Customers', ['manage-customers.php']); ?>
             <?php endif; ?>
+            <?php if (userCan('expiry_alerts')): ?>
+                <?php echo navLink('expiry-alerts.php', 'fa-triangle-exclamation', 'Expiring soon', ['expiry-alerts.php']); ?>
+            <?php endif; ?>
         <?php echo navSectionClose(); ?>
         <?php endif; ?>
 
-        <?php if (userCan('inventory')): ?>
+        <?php if (userCan('inventory') || userCan('stock_requests')): ?>
         <?php echo navSectionOpen('inventory', 'fa-boxes-stacked', 'Inventory', 'inventory', $navCounts['requests'] + $navCounts['low_stock'] + $navCounts['disposal'], $secPages['inventory']); ?>
             <?php echo navLink('inventory-dashboard.php', 'fa-chart-pie', 'Inventory overview', ['inventory-dashboard.php']); ?>
             <?php echo navLink('inventory-items.php', 'fa-box-open', 'Items & stock levels', ['inventory-items.php'], navBadge('low_stock', $navCounts['low_stock'], 'warn')); ?>

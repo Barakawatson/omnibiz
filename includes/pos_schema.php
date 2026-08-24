@@ -33,8 +33,13 @@
 // sales_transaction_items, which ensureInventorySchema() runs before
 // this file's installer does (see posBoot()) - the FK would fail on a
 // fresh install if this table were created before its own target exists.
+// v5: institutional customer details snapshotted onto the sale
+// (customer_tin/address/email). A receipt must render what was true at
+// sale time, so these are copied at checkout rather than joined from
+// the customer table - a later edit to the customer record must never
+// rewrite an old receipt.
 if (!defined('POS_SCHEMA_VERSION')) {
-    define('POS_SCHEMA_VERSION', '4');
+    define('POS_SCHEMA_VERSION', '5');
 }
 
 /** Payment methods a sale can be settled with, and where each lands. */
@@ -102,6 +107,9 @@ function ensurePosSchema(mysqli $conn): void {
         `customer_id` INT(11) DEFAULT NULL,
         `customer_name` VARCHAR(150) DEFAULT NULL,
         `customer_phone` VARCHAR(30) DEFAULT NULL,
+        `customer_tin` VARCHAR(30) DEFAULT NULL,
+        `customer_address` VARCHAR(255) DEFAULT NULL,
+        `customer_email` VARCHAR(120) DEFAULT NULL,
         `subtotal` DECIMAL(14,2) NOT NULL DEFAULT 0.00,
         `discount` DECIMAL(14,2) NOT NULL DEFAULT 0.00,
         `tax_rate` DECIMAL(6,3) NOT NULL DEFAULT 0.000,
@@ -256,6 +264,18 @@ function ensurePosSchema(mysqli $conn): void {
         if (!@$conn->query("ALTER TABLE `inv_items` ADD UNIQUE KEY `uq_inv_item_barcode` (`barcode`)")) {
             error_log('pos_schema: could not add unique barcode index - ' . $conn->error);
         }
+    }
+
+    // --- v4 -> v5: institutional customer snapshot columns ----------------
+    $col = @$conn->query("SHOW COLUMNS FROM `sales_transactions` LIKE 'customer_tin'");
+    if ($col instanceof mysqli_result) {
+        if ($col->num_rows === 0) {
+            @$conn->query("ALTER TABLE `sales_transactions`
+                ADD COLUMN `customer_tin` VARCHAR(30) DEFAULT NULL AFTER `customer_phone`,
+                ADD COLUMN `customer_address` VARCHAR(255) DEFAULT NULL AFTER `customer_tin`,
+                ADD COLUMN `customer_email` VARCHAR(120) DEFAULT NULL AFTER `customer_address`");
+        }
+        $col->free();
     }
 
     // --- Seed one till ---------------------------------------------------

@@ -45,7 +45,8 @@ function roleLabel(string $role): string {
  *   dashboard, manager_overview, pos, pos_sales, pos_void,
  *   products, inventory, purchasing, barcode, stock_requests,
  *   customers, accounting, accounting_manage, reports, users,
- *   settings, departments, shop_settings, disposal_approve
+ *   settings, departments, shop_settings, disposal_approve,
+ *   expiry_alerts
  */
 function roleModules(string $role): array {
     switch ($role) {
@@ -58,13 +59,13 @@ function roleModules(string $role): array {
             return ['dashboard','manager_overview','pos','pos_sales','pos_void','products',
                     'inventory','purchasing','purchasing_approve','barcode','stock_requests','customers',
                     'accounting','accounting_manage','reports','users','settings','departments',
-                    'shop_settings','disposal_approve'];
+                    'shop_settings','disposal_approve','expiry_alerts'];
         case 'manager':
             // Everything operational plus overrides and reports, but the
             // chart of accounts itself stays an admin-only structure.
             return ['dashboard','manager_overview','pos','pos_sales','pos_void','products',
                     'inventory','purchasing','purchasing_approve','barcode','stock_requests','customers',
-                    'accounting','reports','users','settings','disposal_approve'];
+                    'accounting','reports','users','settings','disposal_approve','expiry_alerts'];
         case 'storekeeper':
             // 'purchasing' lets a storekeeper raise a purchase order and
             // book goods in when they arrive - their job. It deliberately
@@ -72,9 +73,9 @@ function roleModules(string $role): array {
             // commits the shop to spending, and recording a payment moves
             // real money out of an account. Both are a supervisor's
             // decision, so only admin and manager hold that key.
-            return ['products','inventory','purchasing','barcode','stock_requests'];
+            return ['products','inventory','purchasing','barcode','stock_requests','expiry_alerts'];
         case 'cashier':
-            return ['pos','pos_sales','customers'];
+            return ['pos','pos_sales','customers','stock_requests','expiry_alerts'];
         default:
             return [];
     }

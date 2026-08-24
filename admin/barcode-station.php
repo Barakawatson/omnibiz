@@ -252,6 +252,14 @@ $pageScript = <<<HTML
         return;
     }
 
+    // This panel's own workflow fields. Unlike pos.php (which has many
+    // unrelated fields - customer phone, payment amounts - that a stray
+    // scan must never disturb), the normal flow HERE is "set the
+    // quantity, then scan" - so focus is often left in qtyInput when the
+    // operator fires the scanner. Exempting these from the "typing
+    // elsewhere" guard below is what lets scanning work from them too.
+    const OWN_FIELDS = ['qtyInput', 'costInput', 'reasonInput'];
+
     const MODE = '{$mode}';
     const CSRF_TOKEN = '{$csrfToken}';
 
@@ -345,7 +353,7 @@ $pageScript = <<<HTML
         const editable = el && ['INPUT','TEXTAREA','SELECT'].includes(el.tagName);
 
         if (e.key === 'F2') { e.preventDefault(); focusScanner(); return; }
-        if (editable && el.id !== 'scanInput') return;
+        if (editable && el.id !== 'scanInput' && !OWN_FIELDS.includes(el.id)) return;
 
         if (e.key === 'Enter') {
             if (el === scanInput) {

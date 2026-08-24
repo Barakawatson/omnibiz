@@ -19,8 +19,12 @@
 // type into their own browser to become an administrator. Tokens are
 // now random, hashed at rest, per-device and expiring - see
 // includes/remember_me.php.
+// v3: institutional customer details (address, TRA TIN, email) so a
+// receipt for an organisation or government entity can carry them.
+// Stored on the customer record (keyed by phone, as always) so they are
+// remembered and auto-filled the next time that phone number is used.
 if (!defined('CORE_SCHEMA_VERSION')) {
-    define('CORE_SCHEMA_VERSION', '2');
+    define('CORE_SCHEMA_VERSION', '3');
 }
 
 function ensureCoreSchema(mysqli $conn): void {
@@ -115,6 +119,18 @@ function ensureCoreSchema(mysqli $conn): void {
             $stmt->close();
             error_log('core_schema: seeded first-run administrator "admin" / "12345" - change this password before the shop goes live.');
         }
+    }
+
+    // --- v2 -> v3: institutional customer details -------------------------
+    $col = @$conn->query("SHOW COLUMNS FROM `customer` LIKE 'address'");
+    if ($col instanceof mysqli_result) {
+        if ($col->num_rows === 0) {
+            @$conn->query("ALTER TABLE `customer`
+                ADD COLUMN `address` VARCHAR(255) DEFAULT NULL AFTER `phone_number`,
+                ADD COLUMN `tin` VARCHAR(30) DEFAULT NULL AFTER `address`,
+                ADD COLUMN `email` VARCHAR(120) DEFAULT NULL AFTER `tin`");
+        }
+        $col->free();
     }
 
     // Mark installed (reuses inv_settings, same as the other modules).
