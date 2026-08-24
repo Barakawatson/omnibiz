@@ -351,18 +351,23 @@ function nextDisposalRequestNo(mysqli $conn): string {
 
 /**
  * Create a disposal request (status pending) for currently expired,
- * in-stock items. $lines: [['item_id'=>, 'qty'=>], ...].
+ * in-stock items. $lines: [['batch_id'=>, 'item_id'=>, 'qty'=>], ...] -
+ * batch_id targets one specific expired inv_batches row (the normal
+ * path, from the disposal screen's per-batch picker); a line with no
+ * batch_id falls back to the old item-level behavior, for the
+ * uncovered-by-any-batch defensive case and for backward compatibility.
  * Nothing is deducted here - deduction happens only in
  * executeDisposalRequest(), after approval.
  *
- * Every line is re-validated against inv_items server-side (still
- * expired, still in stock): the browser's expired-items list can go
- * stale between page load and submit, and is never trusted here.
- * Returns [ok, requestNoOrError].
+ * Every line is re-validated server-side (still expired, still active,
+ * still enough quantity left in that exact batch or item): the
+ * browser's expired-items list can go stale between page load and
+ * submit, and is never trusted here. Returns [ok, requestNoOrError].
  */
 function createDisposalRequest(mysqli $conn, ?int $userId, string $userName, string $reason, array $lines): array {
     $lines = array_values(array_filter($lines, function ($l) {
-        return (int)($l['item_id'] ?? 0) > 0 && (float)($l['qty'] ?? 0) > 0;
+        $hasTarget = (int)($l['batch_id'] ?? 0) > 0 || (int)($l['item_id'] ?? 0) > 0;
+        return $hasTarget && (float)($l['qty'] ?? 0) > 0;
     }));
     if (!$lines) { return [false, 'Add at least one expired item with a quantity.']; }
 
@@ -375,30 +380,57 @@ function createDisposalRequest(mysqli $conn, ?int $userId, string $userName, str
         $requestId = (int)$conn->insert_id;
         $stmt->close();
 
+        // Batch path: lock and re-check the ONE specific batch the
+        // requester picked, not the item's blended current_stock - this
+        // is what actually enforces "can't request more than what's
+        // genuinely expired in this delivery."
+        $batchStmt = $conn->prepare("SELECT b.item_id, b.quantity, b.expiry_date FROM inv_batches b
+            JOIN inv_items i ON i.id = b.item_id
+            WHERE b.id = ? AND i.deleted_at IS NULL AND b.status = 'active' AND b.quantity > 0
+              AND b.expiry_date IS NOT NULL AND b.expiry_date < CURDATE() FOR UPDATE");
+        // Item-level fallback path (no batch_id supplied): today's
+        // behavior, unchanged.
         $itemStmt = $conn->prepare("SELECT name, current_stock, expiry_date FROM inv_items
             WHERE id = ? AND deleted_at IS NULL AND expiry_date IS NOT NULL AND expiry_date < CURDATE() FOR UPDATE");
-        $lineStmt = $conn->prepare("INSERT INTO inv_disposal_request_lines (request_id, item_id, qty_requested, expiry_date) VALUES (?, ?, ?, ?)");
+        $lineStmt = $conn->prepare("INSERT INTO inv_disposal_request_lines (request_id, item_id, batch_id, qty_requested, expiry_date) VALUES (?, ?, ?, ?, ?)");
 
         $saved = 0;
         foreach ($lines as $l) {
-            $itemId = (int)$l['item_id'];
+            $batchId = (int)($l['batch_id'] ?? 0);
             $qty = (float)$l['qty'];
 
-            $itemStmt->bind_param('i', $itemId);
-            $itemStmt->execute();
-            $item = $itemStmt->get_result()->fetch_assoc();
-            if (!$item) {
-                // Not expired (any more), deleted, or never existed - skip
-                // rather than trust what the browser sent.
-                continue;
+            if ($batchId > 0) {
+                $batchStmt->bind_param('i', $batchId);
+                $batchStmt->execute();
+                $batch = $batchStmt->get_result()->fetch_assoc();
+                if (!$batch) {
+                    // Not expired/active any more, or never existed - skip
+                    // rather than trust what the browser sent.
+                    continue;
+                }
+                $itemId = (int)$batch['item_id'];
+                $qty = min($qty, (float)$batch['quantity']);
+                if ($qty <= 0) { continue; }
+                $lineExpiry = $batch['expiry_date'];
+                $lineStmt->bind_param('iiids', $requestId, $itemId, $batchId, $qty, $lineExpiry);
+            } else {
+                $itemId = (int)($l['item_id'] ?? 0);
+                if ($itemId <= 0) { continue; }
+                $itemStmt->bind_param('i', $itemId);
+                $itemStmt->execute();
+                $item = $itemStmt->get_result()->fetch_assoc();
+                if (!$item) { continue; }
+                $qty = min($qty, (float)$item['current_stock']);
+                if ($qty <= 0) { continue; }
+                $noBatch = null;
+                $lineExpiry = $item['expiry_date'];
+                $lineStmt->bind_param('iiids', $requestId, $itemId, $noBatch, $qty, $lineExpiry);
             }
-            $qty = min($qty, (float)$item['current_stock']);
-            if ($qty <= 0) { continue; }
 
-            $lineStmt->bind_param('iids', $requestId, $itemId, $qty, $item['expiry_date']);
             if (!$lineStmt->execute()) { throw new Exception('Could not save disposal request items.'); }
             $saved++;
         }
+        $batchStmt->close();
         $itemStmt->close();
         $lineStmt->close();
 
@@ -472,7 +504,12 @@ function approveDisposalRequest(mysqli $conn, int $requestId, string $decision, 
  * per line via recordStockMovement('expire', ...) and posts the loss to
  * the ledger (DR Stock Loss & Shrinkage / CR Inventory Asset, at
  * weighted-average cost - stock_ledger.php does this automatically,
- * required inside recordStockMovement()).
+ * required inside recordStockMovement()). When a line carries a
+ * batch_id, also deducts from that exact inv_batches row via
+ * disposeFromBatch() and, once all lines are processed, resyncs each
+ * touched item's expiry_date via refreshItemExpiryFromBatches() - this
+ * is what makes an item sellable again once its expired batch is fully
+ * disposed of, with no change to checkout needed.
  *
  * No partial-quantity adjustment here by design: if the physical count
  * differs from qty_approved, that is the existing "Correct Current
@@ -480,6 +517,7 @@ function approveDisposalRequest(mysqli $conn, int $requestId, string $decision, 
  * Returns [ok, message].
  */
 function executeDisposalRequest(mysqli $conn, int $requestId, ?int $userId, string $userName, string $note = ''): array {
+    require_once __DIR__ . '/inv_batches_functions.php';
     $conn->begin_transaction();
     try {
         $stmt = $conn->prepare("SELECT * FROM inv_disposal_requests WHERE id = ? FOR UPDATE");
@@ -490,7 +528,7 @@ function executeDisposalRequest(mysqli $conn, int $requestId, ?int $userId, stri
         if (!$req) { throw new Exception('Disposal request not found.'); }
         if ($req['status'] !== 'approved') { throw new Exception('Only an approved request can be disposed.'); }
 
-        $lineStmt = $conn->prepare("SELECT l.id, l.item_id, l.qty_approved, i.name
+        $lineStmt = $conn->prepare("SELECT l.id, l.item_id, l.batch_id, l.qty_approved, i.name
             FROM inv_disposal_request_lines l JOIN inv_items i ON i.id = l.item_id
             WHERE l.request_id = ? AND l.qty_approved > 0");
         $lineStmt->bind_param('i', $requestId);
@@ -500,12 +538,32 @@ function executeDisposalRequest(mysqli $conn, int $requestId, ?int $userId, stri
         if (!$lines) { throw new Exception('Nothing was approved for disposal on this request.'); }
 
         $reason = 'Expired goods disposal ' . $req['request_no'] . ($note !== '' ? ' - ' . $note : '');
+        $touchedItems = [];
         foreach ($lines as $line) {
             [$ok, $msg] = recordStockMovement(
                 $conn, (int)$line['item_id'], 'expire', -(float)$line['qty_approved'], $userId,
                 $reason, 0.0, null, 'disposal_request', $requestId, false
             );
             if (!$ok) { throw new Exception($line['name'] . ': ' . $msg); }
+
+            // recordStockMovement() only owns inv_items.current_stock -
+            // when this line targeted one specific batch, mirror the same
+            // deduction into inv_batches so the batch's own quantity/
+            // status stay correct (otherwise it would still look active
+            // and expired forever, and the resync below would have
+            // nothing to resync away from).
+            if (!empty($line['batch_id'])) {
+                [$bOk, $bMsg] = disposeFromBatch($conn, (int)$line['batch_id'], (float)$line['qty_approved']);
+                if (!$bOk) { throw new Exception($line['name'] . ': ' . $bMsg); }
+            }
+            $touchedItems[(int)$line['item_id']] = true;
+        }
+
+        // One resync per distinct item, after all its lines are done -
+        // an item can have more than one expired batch on the same
+        // request, so this must run after the loop, not inside it.
+        foreach (array_keys($touchedItems) as $touchedItemId) {
+            refreshItemExpiryFromBatches($conn, $touchedItemId);
         }
 
         $upd = $conn->prepare("UPDATE inv_disposal_requests SET status = 'disposed', disposed_by = ?, disposed_by_name = ?, disposed_at = NOW() WHERE id = ?");

@@ -53,10 +53,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($action === 'create') {
         $reason = trim($_POST['reason'] ?? '');
         $lines = [];
-        $itemIds = $_POST['item_id'] ?? [];
-        $qtys    = $_POST['qty'] ?? [];
-        foreach ((array)$itemIds as $i => $itemId) {
-            $lines[] = ['item_id' => (int)$itemId, 'qty' => (float)($qtys[$i] ?? 0)];
+        // Each option's value is 'b<batch_id>' (the normal, batch-targeted
+        // path) or 'i<item_id>' (the untracked-stock fallback line) - see
+        // the disposalLineTemplate below. createDisposalRequest() re-locks
+        // and re-validates whichever one this resolves to; nothing here
+        // is trusted past that.
+        $keys = $_POST['line_key'] ?? [];
+        $qtys = $_POST['qty'] ?? [];
+        foreach ((array)$keys as $i => $key) {
+            $qty = (float)($qtys[$i] ?? 0);
+            if ($qty <= 0) { continue; }
+            if (preg_match('/^b(\d+)$/', (string)$key, $m)) {
+                $lines[] = ['batch_id' => (int)$m[1], 'qty' => $qty];
+            } elseif (preg_match('/^i(\d+)$/', (string)$key, $m)) {
+                $lines[] = ['item_id' => (int)$m[1], 'qty' => $qty];
+            }
         }
         [$ok, $msg] = createDisposalRequest($conn, $userId, $userName, $reason, $lines);
         disposalFlash($ok ? 'success' : 'danger', $ok ? "Disposal request $msg submitted - waiting for manager/admin approval." : $msg);
@@ -88,17 +99,78 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 }
 
 // ---------- Data ----------
-// Currently expired, still in stock. Same condition retailIsExpired()
-// uses (includes/catalog_functions.php), department-filtered for
-// operational consistency with every other inventory list.
-$expiredItems = $conn->query(
-    "SELECT i.id, i.name, i.sku, i.expiry_date, i.current_stock, i.average_cost, u.abbreviation AS unit,
-            DATEDIFF(CURDATE(), i.expiry_date) AS days_expired
+// Currently expired stock, computed PER BATCH rather than from the
+// item's blended current_stock. current_stock is the item's TOTAL
+// on-hand across every batch, fresh and expired mixed together - an
+// item with 100 expired units and 100 fresh ones has current_stock=200,
+// and reading that field here would show the fresh half as expired too.
+// Reading inv_batches instead means an item with two separate expired
+// deliveries correctly becomes two rows, each with its own quantity.
+$expiredItems = [];
+$batchRes = $conn->query(
+    "SELECT b.id AS batch_id, b.item_id, b.batch_no, b.quantity, b.expiry_date,
+            i.name, i.sku, i.average_cost, u.abbreviation AS unit,
+            DATEDIFF(CURDATE(), b.expiry_date) AS days_expired
+     FROM inv_batches b
+     JOIN inv_items i ON i.id = b.item_id
+     LEFT JOIN inv_units u ON u.id = i.unit_id
+     WHERE b.status = 'active' AND b.quantity > 0
+       AND b.expiry_date IS NOT NULL AND b.expiry_date < CURDATE()
+       AND i.deleted_at IS NULL AND i.status = 'active'"
+     . catalogDepartmentFilterSql($conn, 'i') . " ORDER BY b.expiry_date ASC");
+if ($batchRes) {
+    foreach ($batchRes->fetch_all(MYSQLI_ASSOC) as $b) {
+        $expiredItems[] = [
+            'batch_id'     => (int)$b['batch_id'],
+            'item_id'      => (int)$b['item_id'],
+            'name'         => $b['name'],
+            'sku'          => $b['sku'],
+            'expiry_date'  => $b['expiry_date'],
+            'quantity'     => (float)$b['quantity'],
+            'average_cost' => (float)$b['average_cost'],
+            'unit'         => $b['unit'],
+            'days_expired' => (int)$b['days_expired'],
+            'batch_label'  => 'Batch ' . (($b['batch_no'] ?? '') !== '' ? $b['batch_no'] : ('#' . $b['batch_id'])),
+        ];
+    }
+}
+
+// Defensive fallback: an item whose OWN expiry_date field says expired
+// (refreshItemExpiryFromBatches() keeps that field synced to the
+// earliest active batch) but whose active batches don't fully cover its
+// current_stock - a pre-batch-tracking data gap that shouldn't occur
+// post-backfill, but shouldn't silently hide stock either. Surfaces
+// only the uncovered remainder, so nothing vanishes from the queue and
+// a legacy item with no batches at all still shows its full stock,
+// exactly as before this fix.
+$fallbackRes = $conn->query(
+    "SELECT i.id AS item_id, i.name, i.sku, i.expiry_date, i.current_stock, i.average_cost, u.abbreviation AS unit,
+            DATEDIFF(CURDATE(), i.expiry_date) AS days_expired,
+            COALESCE((SELECT SUM(b2.quantity) FROM inv_batches b2 WHERE b2.item_id = i.id AND b2.status = 'active'), 0) AS batch_covered
      FROM inv_items i LEFT JOIN inv_units u ON u.id = i.unit_id
      WHERE i.deleted_at IS NULL AND i.status = 'active'
        AND i.expiry_date IS NOT NULL AND i.expiry_date < CURDATE()
        AND i.current_stock > 0"
-     . catalogDepartmentFilterSql($conn, 'i') . " ORDER BY i.expiry_date ASC")->fetch_all(MYSQLI_ASSOC);
+     . catalogDepartmentFilterSql($conn, 'i'));
+if ($fallbackRes) {
+    foreach ($fallbackRes->fetch_all(MYSQLI_ASSOC) as $f) {
+        $uncovered = (float)$f['current_stock'] - (float)$f['batch_covered'];
+        if ($uncovered <= 0.0005) { continue; }
+        $expiredItems[] = [
+            'batch_id'     => null,
+            'item_id'      => (int)$f['item_id'],
+            'name'         => $f['name'],
+            'sku'          => $f['sku'],
+            'expiry_date'  => $f['expiry_date'],
+            'quantity'     => $uncovered,
+            'average_cost' => (float)$f['average_cost'],
+            'unit'         => $f['unit'],
+            'days_expired' => (int)$f['days_expired'],
+            'batch_label'  => 'Untracked stock',
+        ];
+    }
+}
+usort($expiredItems, function ($a, $b) { return strcmp($a['expiry_date'], $b['expiry_date']); });
 
 // The status is allow-listed AND bound. The allow-list is what keeps an
 // unknown value from silently returning nothing; binding is what keeps
@@ -158,17 +230,18 @@ include 'inventory-header.php';
     <div class="p-3 border-bottom"><h6 class="mb-0 fw-bold"><i class="fas fa-calendar-xmark me-2" style="color:var(--inv-primary);"></i>Currently Expired, In Stock</h6></div>
     <div class="table-responsive">
         <table class="inv-table">
-            <thead><tr><th>Item</th><th>Expired</th><th class="text-end">In Stock</th><th class="text-end">Est. Loss Value</th></tr></thead>
+            <thead><tr><th>Item</th><th>Batch</th><th>Expired</th><th class="text-end">Qty</th><th class="text-end">Est. Loss Value</th></tr></thead>
             <tbody>
             <?php if (!$expiredItems): ?>
-                <tr><td colspan="4"><div class="empty-state"><i class="fas fa-circle-check d-block"></i>Nothing currently expired is still in stock.</div></td></tr>
+                <tr><td colspan="5"><div class="empty-state"><i class="fas fa-circle-check d-block"></i>Nothing currently expired is still in stock.</div></td></tr>
             <?php endif; ?>
             <?php foreach ($expiredItems as $it): ?>
                 <tr>
                     <td><?php echo htmlspecialchars($it['name']); ?><?php if ($it['sku']): ?> <span class="text-muted" style="font-size:.8rem;">(<?php echo htmlspecialchars($it['sku']); ?>)</span><?php endif; ?></td>
+                    <td class="text-muted" style="font-size:.85rem;"><?php echo htmlspecialchars($it['batch_label']); ?></td>
                     <td><span class="inv-badge bg-danger text-white"><?php echo (int)$it['days_expired']; ?> day(s) ago</span></td>
-                    <td class="text-end"><?php echo invQty($it['current_stock']); ?> <?php echo htmlspecialchars($it['unit'] ?? ''); ?></td>
-                    <td class="text-end">Tsh <?php echo number_format((float)$it['current_stock'] * (float)$it['average_cost'], 2); ?></td>
+                    <td class="text-end"><?php echo invQty($it['quantity']); ?> <?php echo htmlspecialchars($it['unit'] ?? ''); ?></td>
+                    <td class="text-end">Tsh <?php echo number_format($it['quantity'] * $it['average_cost'], 2); ?></td>
                 </tr>
             <?php endforeach; ?>
             </tbody>
@@ -344,10 +417,14 @@ include 'inventory-header.php';
 
 <template id="disposalLineTemplate">
     <div class="d-flex gap-2 mb-2 disposal-line">
-        <select class="form-select" name="item_id[]" required>
-            <option value="">Choose an expired item...</option>
+        <select class="form-select" name="line_key[]" required onchange="onDisposalLineChange(this)">
+            <option value="">Choose an expired batch...</option>
             <?php foreach ($expiredItems as $it): ?>
-            <option value="<?php echo (int)$it['id']; ?>"><?php echo htmlspecialchars($it['name']); ?> (stock: <?php echo invQty($it['current_stock']); ?> <?php echo htmlspecialchars($it['unit'] ?? ''); ?>, expired <?php echo (int)$it['days_expired']; ?>d ago)</option>
+            <option value="<?php echo $it['batch_id'] ? 'b' . (int)$it['batch_id'] : 'i' . (int)$it['item_id']; ?>"
+                    data-qty="<?php echo (float)$it['quantity']; ?>">
+                <?php echo htmlspecialchars($it['name']); ?> - <?php echo htmlspecialchars($it['batch_label']); ?>
+                (<?php echo invQty($it['quantity']); ?> <?php echo htmlspecialchars($it['unit'] ?? ''); ?>, expired <?php echo (int)$it['days_expired']; ?>d ago)
+            </option>
             <?php endforeach; ?>
         </select>
         <input type="number" class="form-control" name="qty[]" step="0.001" min="0.001" placeholder="Qty" style="max-width:130px;" required>
@@ -363,6 +440,19 @@ function addDisposalLine() {
     document.getElementById('disposalLines').appendChild(tpl.content.cloneNode(true));
 }
 addDisposalLine();
+
+// Client-side hint only, from the chosen batch's own remaining quantity -
+// createDisposalRequest() re-locks and re-checks the real quantity
+// server-side regardless, same as every other cap in this app.
+function onDisposalLineChange(sel) {
+    const line = sel.closest('.disposal-line');
+    const qtyInput = line ? line.querySelector('input[name="qty[]"]') : null;
+    if (!qtyInput) { return; }
+    const opt = sel.selectedOptions[0];
+    const max = opt ? opt.dataset.qty : '';
+    if (max) { qtyInput.max = max; qtyInput.placeholder = 'Qty (max ' + max + ')'; }
+    else { qtyInput.removeAttribute('max'); qtyInput.placeholder = 'Qty'; }
+}
 
 // MX.fillModal only touches fields named by a data-field-* attribute, so
 // a reason typed for one request would otherwise still be sitting in the

@@ -81,26 +81,84 @@ $metrics = $mStmt->get_result()->fetch_assoc();
 $mStmt->close();
 
 // ---------- Already expired, still on the books ----------
-$eConds = ["i.deleted_at IS NULL", "i.status = 'active'", "i.current_stock > 0",
-           "i.expiry_date IS NOT NULL", "i.expiry_date < CURDATE()"];
-$eParams = [];
-$eTypes  = '';
-if ($deptFilter !== '') { $eConds[] = 'i.department = ?'; $eParams[] = $deptFilter; $eTypes .= 's'; }
-$eWhere = implode(' AND ', $eConds) . $deptSql;
+// Same PER-BATCH fix as admin/inventory-disposal.php's eligible list:
+// current_stock is the item's blended total across every batch, so an
+// item with one expired batch and one fresh one must not have the
+// fresh half counted as expired too. See that page's comment for the
+// full reasoning; this mirrors it for consistency.
+$ebConds = ["i.deleted_at IS NULL", "i.status = 'active'",
+            "b.status = 'active'", "b.quantity > 0",
+            "b.expiry_date IS NOT NULL", "b.expiry_date < CURDATE()"];
+$ebParams = [];
+$ebTypes  = '';
+if ($deptFilter !== '') { $ebConds[] = 'i.department = ?'; $ebParams[] = $deptFilter; $ebTypes .= 's'; }
+$ebWhere = implode(' AND ', $ebConds) . $deptSql;
 
-$eStmt = $conn->prepare(
-    "SELECT i.id, i.name, i.expiry_date, i.current_stock, i.department,
+$expired = [];
+$ebStmt = $conn->prepare(
+    "SELECT i.name, i.department, b.id AS batch_id, b.batch_no, b.quantity, b.expiry_date,
             u.abbreviation AS unit, c.name AS category_name
+     FROM inv_batches b
+     JOIN inv_items i ON i.id = b.item_id
+     LEFT JOIN inv_units u ON u.id = i.unit_id
+     LEFT JOIN inv_categories c ON c.id = i.category_id
+     WHERE $ebWhere
+     ORDER BY b.expiry_date ASC
+     LIMIT 200");
+if ($ebParams) { $ebStmt->bind_param($ebTypes, ...$ebParams); }
+$ebStmt->execute();
+foreach ($ebStmt->get_result()->fetch_all(MYSQLI_ASSOC) as $b) {
+    $expired[] = [
+        'name'          => $b['name'],
+        'department'    => $b['department'],
+        'category_name' => $b['category_name'],
+        'unit'          => $b['unit'],
+        'expiry_date'   => $b['expiry_date'],
+        'quantity'      => (float)$b['quantity'],
+        'batch_label'   => 'Batch ' . (($b['batch_no'] ?? '') !== '' ? $b['batch_no'] : ('#' . $b['batch_id'])),
+    ];
+}
+$ebStmt->close();
+
+// Same defensive fallback as the disposal screen: an item whose own
+// expiry_date field is expired but whose active batches don't fully
+// cover its current_stock (a pre-batch-tracking data gap) still
+// surfaces its uncovered remainder, so nothing silently vanishes.
+$efConds = ["i.deleted_at IS NULL", "i.status = 'active'", "i.current_stock > 0",
+            "i.expiry_date IS NOT NULL", "i.expiry_date < CURDATE()"];
+$efParams = [];
+$efTypes  = '';
+if ($deptFilter !== '') { $efConds[] = 'i.department = ?'; $efParams[] = $deptFilter; $efTypes .= 's'; }
+$efWhere = implode(' AND ', $efConds) . $deptSql;
+
+$efStmt = $conn->prepare(
+    "SELECT i.name, i.department, i.current_stock, i.expiry_date,
+            u.abbreviation AS unit, c.name AS category_name,
+            COALESCE((SELECT SUM(b2.quantity) FROM inv_batches b2 WHERE b2.item_id = i.id AND b2.status = 'active'), 0) AS batch_covered
      FROM inv_items i
      LEFT JOIN inv_units u ON u.id = i.unit_id
      LEFT JOIN inv_categories c ON c.id = i.category_id
-     WHERE $eWhere
-     ORDER BY i.expiry_date ASC
+     WHERE $efWhere
      LIMIT 200");
-if ($eParams) { $eStmt->bind_param($eTypes, ...$eParams); }
-$eStmt->execute();
-$expired = $eStmt->get_result()->fetch_all(MYSQLI_ASSOC);
-$eStmt->close();
+if ($efParams) { $efStmt->bind_param($efTypes, ...$efParams); }
+$efStmt->execute();
+foreach ($efStmt->get_result()->fetch_all(MYSQLI_ASSOC) as $f) {
+    $uncovered = (float)$f['current_stock'] - (float)$f['batch_covered'];
+    if ($uncovered <= 0.0005) { continue; }
+    $expired[] = [
+        'name'          => $f['name'],
+        'department'    => $f['department'],
+        'category_name' => $f['category_name'],
+        'unit'          => $f['unit'],
+        'expiry_date'   => $f['expiry_date'],
+        'quantity'      => $uncovered,
+        'batch_label'   => 'Untracked stock',
+    ];
+}
+$efStmt->close();
+
+usort($expired, function ($a, $b) { return strcmp($a['expiry_date'], $b['expiry_date']); });
+$expired = array_slice($expired, 0, 200);
 
 $pageTitle = 'Expiry Alerts';
 $breadcrumbs = [['Dashboard', 'index.php'], ['Expiry Alerts']];
@@ -209,14 +267,15 @@ include 'inventory-header.php';
     </div>
     <div class="table-responsive">
         <table class="inv-table">
-            <thead><tr><th>Item</th><th>Category</th><th>Department</th><th class="text-end">Stock</th><th>Expired on</th><?php if ($canDispose): ?><th></th><?php endif; ?></tr></thead>
+            <thead><tr><th>Item</th><th>Batch</th><th>Category</th><th>Department</th><th class="text-end">Qty</th><th>Expired on</th><?php if ($canDispose): ?><th></th><?php endif; ?></tr></thead>
             <tbody>
                 <?php foreach ($expired as $row): ?>
                 <tr>
                     <td><strong><?php echo htmlspecialchars($row['name']); ?></strong></td>
+                    <td class="text-muted" style="font-size:.85rem;"><?php echo htmlspecialchars($row['batch_label']); ?></td>
                     <td><?php echo htmlspecialchars($row['category_name'] ?? '—'); ?></td>
                     <td><?php echo htmlspecialchars(catalogDepartmentLabel($row['department'])); ?></td>
-                    <td class="text-end"><?php echo invQty($row['current_stock']); ?> <?php echo htmlspecialchars($row['unit'] ?? ''); ?></td>
+                    <td class="text-end"><?php echo invQty($row['quantity']); ?> <?php echo htmlspecialchars($row['unit'] ?? ''); ?></td>
                     <td><span class="inv-badge bg-danger"><?php echo date('d M Y', strtotime($row['expiry_date'])); ?></span></td>
                     <?php if ($canDispose): ?>
                     <td class="text-end"><a href="inventory-disposal.php" class="btn btn-sm btn-outline-danger">Request disposal</a></td>
