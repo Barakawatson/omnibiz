@@ -61,11 +61,12 @@ if (!defined('MX_UI_ASSETS_EMITTED')) {
 
     // Live badge counts. Each query is guarded so a module whose tables
     // are not installed yet can never break navigation.
-    $navCounts = ['requests' => 0, 'low_stock' => 0, 'open_pos' => 0, 'unclosed_days' => 0, 'disposal' => 0];
+    $navCounts = ['requests' => 0, 'low_stock' => 0, 'open_pos' => 0, 'unclosed_days' => 0, 'disposal' => 0, 'cancelled_carts_today' => 0];
     if (isset($conn) && $conn instanceof mysqli) {
         $navQueries = [
             'requests'  => "SELECT COUNT(*) AS c FROM inv_stock_requests WHERE status = 'pending'",
             'low_stock' => "SELECT COUNT(*) AS c FROM inv_items WHERE deleted_at IS NULL AND status = 'active' AND (current_stock <= 0 OR (reorder_level > 0 AND current_stock <= reorder_level))",
+            'cancelled_carts_today' => "SELECT COUNT(*) AS c FROM cancelled_carts WHERE DATE(created_at) = CURDATE()",
             'open_pos'  => "SELECT COUNT(*) AS c FROM inv_purchase_orders WHERE deleted_at IS NULL AND status IN ('draft','approved','partially_received')",
             'disposal'  => "SELECT COUNT(*) AS c FROM inv_disposal_requests WHERE status = 'pending'",
             // Past trading days whose cash was never counted.
@@ -88,7 +89,8 @@ if (!defined('MX_UI_ASSETS_EMITTED')) {
                          'inventory-categories.php','inventory-units.php','inventory-disposal.php',
                          'inventory-disposal-print.php','inventory-reports.php','inventory-settings.php'],
         'accounting' => ['accounting-dashboard.php','chart-of-accounts.php','journal.php',
-                         'journal-entry.php','expenses.php','z-report.php','profit-loss.php'],
+                         'journal-entry.php','expenses.php','z-report.php','profit-loss.php',
+                         'supplier-liabilities.php'],
         'account'    => ['manage-users.php','profile.php','departments.php','shop-settings.php','setup.php'],
     ];
     ?>
@@ -172,6 +174,10 @@ if (!defined('MX_UI_ASSETS_EMITTED')) {
             <?php if (userCan('expiry_alerts')): ?>
                 <?php echo navLink('expiry-alerts.php', 'fa-triangle-exclamation', 'Expiring soon', ['expiry-alerts.php']); ?>
             <?php endif; ?>
+            <?php if (userCan('fraud_audit')): ?>
+                <?php echo navLink('report.php?g=audit&r=cancelled_carts', 'fa-shield-halved', 'Cancelled carts', [],
+                    navBadge('cancelled_carts_today', $navCounts['cancelled_carts_today'], 'danger')); ?>
+            <?php endif; ?>
         <?php echo navSectionClose(); ?>
         <?php endif; ?>
 
@@ -206,8 +212,9 @@ if (!defined('MX_UI_ASSETS_EMITTED')) {
         <?php echo navSectionClose(); ?>
         <?php endif; ?>
 
-        <?php if (userCan('accounting')): ?>
+        <?php if (userCan('accounting') || userCan('supplier_liabilities')): ?>
         <?php echo navSectionOpen('accounting', 'fa-book', 'Finance', 'accounting', $navCounts['unclosed_days'], $secPages['accounting']); ?>
+            <?php if (userCan('accounting')): ?>
             <?php echo navLink('accounting-dashboard.php', 'fa-chart-pie', 'Finance overview', ['accounting-dashboard.php']); ?>
             <?php echo navLink('z-report.php', 'fa-cash-register', 'Daily close (Z-report)', ['z-report.php'], navBadge('unclosed_days', $navCounts['unclosed_days'], 'warn')); ?>
             <?php echo navLink('expenses.php', 'fa-money-bill-wave', 'Expenses', ['expenses.php']); ?>
@@ -215,6 +222,10 @@ if (!defined('MX_UI_ASSETS_EMITTED')) {
             <?php echo navLink('journal.php', 'fa-book-open', 'General ledger', ['journal.php','journal-entry.php']); ?>
             <?php if (userCan('accounting_manage')): ?>
                 <?php echo navLink('chart-of-accounts.php', 'fa-sitemap', 'Chart of accounts', ['chart-of-accounts.php']); ?>
+            <?php endif; ?>
+            <?php endif; ?>
+            <?php if (userCan('supplier_liabilities')): ?>
+                <?php echo navLink('supplier-liabilities.php', 'fa-hand-holding-dollar', 'Supplier liabilities', ['supplier-liabilities.php']); ?>
             <?php endif; ?>
         <?php echo navSectionClose(); ?>
         <?php endif; ?>

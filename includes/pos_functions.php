@@ -673,12 +673,17 @@ function posVoidSale(mysqli $conn, int $txnId, ?int $userId, string $reason = ''
  * Increment stock for one item by barcode/id (storekeeper scanning
  * deliveries in). Uses the same locked audit-trail movement.
  * $mode: 'add' (receive N more) or 'set' (physical count = N).
+ * $expiryDate: optional best-before date for this delivery (mode 'add'
+ * only) - not every item is perishable, so it's fine to leave blank.
  * Returns [ok, message, newQty].
  */
-function posStockIn(mysqli $conn, int $itemId, float $qty, ?int $userId, string $mode = 'add', float $unitCost = 0.0, string $reason = ''): array {
+function posStockIn(mysqli $conn, int $itemId, float $qty, ?int $userId, string $mode = 'add', float $unitCost = 0.0, string $reason = '', ?string $expiryDate = null): array {
     if ($itemId <= 0) { return [false, 'Unknown item.', 0.0]; }
     if ($mode === 'add' && $qty <= 0) { return [false, 'Quantity must be greater than zero.', 0.0]; }
     if ($mode === 'set' && $qty < 0) { return [false, 'Counted quantity cannot be negative.', 0.0]; }
+    // A malformed or blank date is treated as "not supplied" rather than
+    // rejecting the whole stock-in - most goods aren't perishable.
+    $expiryDate = ($expiryDate !== null && strtotime($expiryDate) !== false) ? $expiryDate : null;
 
     $conn->begin_transaction();
     try {
@@ -714,8 +719,9 @@ function posStockIn(mysqli $conn, int $itemId, float $qty, ?int $userId, string 
         // falls back at the till.
         require_once __DIR__ . '/inv_batches_functions.php';
         if ($delta > 0) {
-            // Adding stock: create a batch. The barcode station doesn't
-            // capture expiry dates, so this batch sorts last in FEFO.
+            // Adding stock: create a batch, dated if the storekeeper
+            // supplied a best-before date for this delivery. Undated
+            // batches sort last in FEFO (treated as non-perishable).
             $batchCost = $unitCost > 0 ? $unitCost : 0.0;
             if ($batchCost <= 0) {
                 $costStmt = $conn->prepare("SELECT average_cost, purchase_price FROM inv_items WHERE id = ?");
@@ -726,7 +732,7 @@ function posStockIn(mysqli $conn, int $itemId, float $qty, ?int $userId, string 
                 $batchCost = (float)($costRow['average_cost'] > 0 ? $costRow['average_cost'] : $costRow['purchase_price']);
             }
             [$bOk, $bMsg, $batchId] = createBatch(
-                $conn, $itemId, null, $delta, $batchCost, null, 'barcode_station', null
+                $conn, $itemId, null, $delta, $batchCost, $expiryDate, 'barcode_station', null
             );
             if (!$bOk) { error_log("Batch creation failed for barcode stock-in of item {$itemId}: $bMsg"); }
         } elseif ($delta < 0) {
@@ -739,6 +745,11 @@ function posStockIn(mysqli $conn, int $itemId, float $qty, ?int $userId, string 
                 error_log("FEFO deduction failed for barcode count adjustment of item {$itemId}: {$fefo['message']}");
             }
         }
+        // Either branch can change which batch is now the earliest-active
+        // one (a fresh dated batch arriving, or the old one depleting) -
+        // keep the item's own expiry_date (what pricing/checkout actually
+        // read) in step with it either way.
+        refreshItemExpiryFromBatches($conn, $itemId);
 
         $conn->commit();
         return [true, $item['name'] . ': ' . ($mode === 'set' ? 'adjusted to ' : 'stock now ') . invQty($after) . '.', $after];
@@ -819,6 +830,68 @@ function posDeleteHeldSale(mysqli $conn, int $id): void {
     $stmt->bind_param('i', $id);
     $stmt->execute();
     $stmt->close();
+}
+
+/**
+ * Permanent record of a cart that never became a sale - the live cart
+ * emptied via Clear Cart (or its last item removed), or a parked held
+ * sale discarded. A reason is mandatory by the time this is called (the
+ * caller enforces that; this just refuses to write an empty one, failing
+ * closed rather than silently accepting an unaudited cancellation).
+ *
+ * When $source is 'held_sale', the held sale row is deleted HERE, inside
+ * the same transaction as the audit insert - so the row is either fully
+ * recorded before the held sale disappears, or (on any failure) the held
+ * sale is left untouched rather than vanishing unaudited.
+ *
+ * Returns [ok, message, id].
+ */
+function posLogCancelledCart(
+    mysqli $conn,
+    ?int $cashierId,
+    string $cashierName,
+    int $terminalId,
+    string $source,
+    ?int $heldSaleId,
+    string $reasonCode,
+    string $reasonDetail,
+    array $items,
+    float $totalValue
+): array {
+    $reasonCode = trim($reasonCode);
+    if ($reasonCode === '') { return [false, 'A cancellation reason is required.', 0]; }
+    $source = ($source === 'held_sale') ? 'held_sale' : 'live_cart';
+    $terminalIdVal = $terminalId > 0 ? $terminalId : null;
+    $heldSaleIdVal = ($source === 'held_sale' && $heldSaleId && $heldSaleId > 0) ? $heldSaleId : null;
+    $reasonDetailVal = trim($reasonDetail) ?: null;
+    $json = json_encode(array_values($items));
+    $itemCount = count($items);
+
+    $conn->begin_transaction();
+    try {
+        $stmt = $conn->prepare(
+            "INSERT INTO cancelled_carts
+                (cashier_id, cashier_name, terminal_id, source, held_sale_id,
+                 reason_code, reason_detail, itemized_cart_json, item_count, total_value)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        );
+        $stmt->bind_param('isisisssid',
+            $cashierId, $cashierName, $terminalIdVal, $source, $heldSaleIdVal,
+            $reasonCode, $reasonDetailVal, $json, $itemCount, $totalValue);
+        if (!$stmt->execute()) { $stmt->close(); throw new Exception('Could not record the cancellation.'); }
+        $id = (int)$conn->insert_id;
+        $stmt->close();
+
+        if ($heldSaleIdVal !== null) {
+            posDeleteHeldSale($conn, $heldSaleIdVal);
+        }
+
+        $conn->commit();
+        return [true, 'Cancellation recorded.', $id];
+    } catch (Throwable $e) {
+        $conn->rollback();
+        return [false, $e->getMessage(), 0];
+    }
 }
 
 // ---------- Receipt payload -------------------------------------------

@@ -38,8 +38,15 @@
 // sale time, so these are copied at checkout rather than joined from
 // the customer table - a later edit to the customer record must never
 // rewrite an old receipt.
+// v6: cancelled_carts - a cart that never became a sale (Clear Cart
+// emptying it, or a held sale discarded) is otherwise invisible to
+// everyone but the cashier who saw it happen. Every cancellation now
+// requires a reason and leaves a permanent, admin-visible row, covering
+// both the live in-progress cart and a discarded held sale (the same
+// gap one step removed - posDeleteHeldSale() used to be a silent hard
+// delete with no trace at all).
 if (!defined('POS_SCHEMA_VERSION')) {
-    define('POS_SCHEMA_VERSION', '5');
+    define('POS_SCHEMA_VERSION', '6');
 }
 
 /** Payment methods a sale can be settled with, and where each lands. */
@@ -213,6 +220,30 @@ function ensurePosSchema(mysqli $conn): void {
         PRIMARY KEY (`id`),
         KEY `idx_held_cashier` (`cashier_id`)
     ) $charset") || error_log('pos_schema pos_held_sales: ' . $conn->error);
+
+    // --- Cancelled carts (v6) -------------------------------------------
+    // A cart that never became a sale, discarded either live (Clear Cart)
+    // or as a parked held sale, with the reason the cashier gave. This is
+    // the only record such a cart ever existed - itemized_cart_json is
+    // the same shape pos_held_sales.cart_json already uses, kept as a
+    // snapshot rather than a join because the cart itself is gone.
+    @$conn->query("CREATE TABLE IF NOT EXISTS `cancelled_carts` (
+        `id` INT(11) NOT NULL AUTO_INCREMENT,
+        `cashier_id` INT(11) DEFAULT NULL,
+        `cashier_name` VARCHAR(100) DEFAULT NULL,
+        `terminal_id` INT(11) DEFAULT NULL,
+        `source` ENUM('live_cart','held_sale') NOT NULL DEFAULT 'live_cart',
+        `held_sale_id` INT(11) DEFAULT NULL,
+        `reason_code` VARCHAR(40) NOT NULL,
+        `reason_detail` VARCHAR(255) DEFAULT NULL,
+        `itemized_cart_json` MEDIUMTEXT NOT NULL,
+        `item_count` INT(11) NOT NULL DEFAULT 0,
+        `total_value` DECIMAL(14,2) NOT NULL DEFAULT 0.00,
+        `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (`id`),
+        KEY `idx_cancelled_cashier` (`cashier_id`),
+        KEY `idx_cancelled_created` (`created_at`)
+    ) $charset") || error_log('pos_schema cancelled_carts: ' . $conn->error);
 
     // --- v1 -> v2 column additions (guarded) ----------------------------
     $deptCol = "VARCHAR(32) NOT NULL DEFAULT 'general'";

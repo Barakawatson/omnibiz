@@ -66,4 +66,13 @@ if (userCan('accounting')) {
             AND NOT EXISTS (SELECT 1 FROM acc_daily_close c WHERE c.close_date = DATE(t.created_at))");
 }
 
+if (userCan('fraud_audit')) {
+    // Admin-only, same as the Cancelled Carts report itself. This is
+    // what makes the report "near real-time" (the next 30s poll, not
+    // instant) without any push infrastructure - MX.watchAlerts()
+    // already toasts anything whose count went up since the last check.
+    $counts['cancelled_carts_today'] = alertCount($conn,
+        "SELECT COUNT(*) FROM cancelled_carts WHERE DATE(created_at) = CURDATE()");
+}
+
 echo json_encode($counts);

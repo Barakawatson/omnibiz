@@ -126,6 +126,42 @@ $byCashier = mgrRows($conn,
      WHERE DATE(t.created_at) BETWEEN ? AND ?
      GROUP BY t.cashier_name ORDER BY revenue DESC", $from, $to);
 
+// Cancelled carts per cashier - same fraud-oversight audience as the
+// Cancelled Carts report (this whole page already requires
+// manager_overview, which only admin/manager hold, so no extra gate is
+// needed here). Merged in by name rather than joined in SQL: the two
+// tables share no key besides cashier_id/name, and a cashier who
+// cancelled carts without completing any sale in the period must still
+// show up, not be silently dropped by an inner join.
+if (userCan('fraud_audit')) {
+    $cancelledByCashier = [];
+    foreach (mgrRows($conn,
+        "SELECT COALESCE(cashier_name, 'Unknown') AS cashier_name,
+                COUNT(*) AS cancelled_count,
+                COALESCE(SUM(total_value), 0) AS cancelled_value
+         FROM cancelled_carts
+         WHERE DATE(created_at) BETWEEN ? AND ?
+         GROUP BY COALESCE(cashier_name, 'Unknown')", $from, $to) as $cc) {
+        $cancelledByCashier[$cc['cashier_name']] = $cc;
+    }
+    foreach ($byCashier as &$c) {
+        $name = $c['cashier_name'] ?: 'Unknown';
+        $c['cancelled_count'] = (int)($cancelledByCashier[$name]['cancelled_count'] ?? 0);
+        $c['cancelled_value'] = (float)($cancelledByCashier[$name]['cancelled_value'] ?? 0);
+        unset($cancelledByCashier[$name]);
+    }
+    unset($c);
+    // Anyone left in $cancelledByCashier cancelled carts but made no
+    // completed/voided sale in this period, so never appeared above.
+    foreach ($cancelledByCashier as $name => $cc) {
+        $byCashier[] = [
+            'cashier_name' => $name, 'sale_count' => 0, 'revenue' => 0, 'profit' => 0,
+            'discounts' => 0, 'voids' => 0,
+            'cancelled_count' => (int)$cc['cancelled_count'], 'cancelled_value' => (float)$cc['cancelled_value'],
+        ];
+    }
+}
+
 // ---- By terminal -------------------------------------------------------
 $byTerminal = mgrRows($conn,
     "SELECT COALESCE(term.name, 'Unassigned') AS terminal_name,
@@ -328,10 +364,10 @@ function mgrMoney($v) { return 'Tsh ' . number_format((float)$v); }
             <div class="p-3 border-bottom"><h6 class="mb-0 fw-bold"><i class="fas fa-user-tie me-2" style="color:var(--inv-primary);"></i>Cashier Performance</h6></div>
             <div class="table-responsive">
                 <table class="inv-table">
-                    <thead><tr><th>Cashier</th><th class="text-end">Sales</th><th class="text-end">Revenue</th><th class="text-end">Profit</th><th class="text-end">Discounts</th><th class="text-end">Voids</th></tr></thead>
+                    <thead><tr><th>Cashier</th><th class="text-end">Sales</th><th class="text-end">Revenue</th><th class="text-end">Profit</th><th class="text-end">Discounts</th><th class="text-end">Voids</th><?php if (userCan('fraud_audit')): ?><th class="text-end">Cancelled</th><?php endif; ?></tr></thead>
                     <tbody>
                     <?php if (!$byCashier): ?>
-                        <tr><td colspan="6"><div class="empty-state"><i class="fas fa-user-slash d-block"></i>No sales in this period.</div></td></tr>
+                        <tr><td colspan="<?php echo userCan('fraud_audit') ? 7 : 6; ?>"><div class="empty-state"><i class="fas fa-user-slash d-block"></i>No sales in this period.</div></td></tr>
                     <?php endif; ?>
                     <?php foreach ($byCashier as $c): ?>
                         <tr>
@@ -341,6 +377,12 @@ function mgrMoney($v) { return 'Tsh ' . number_format((float)$v); }
                             <td class="text-end"><?php echo mgrMoney($c['profit']); ?></td>
                             <td class="text-end <?php echo (float)$c['discounts'] > 0 ? 'text-warning' : 'text-muted'; ?>"><?php echo mgrMoney($c['discounts']); ?></td>
                             <td class="text-end <?php echo (int)$c['voids'] > 0 ? 'text-danger fw-bold' : 'text-muted'; ?>"><?php echo (int)$c['voids']; ?></td>
+                            <?php if (userCan('fraud_audit')): ?>
+                            <td class="text-end <?php echo (int)($c['cancelled_count'] ?? 0) > 0 ? 'text-danger fw-bold' : 'text-muted'; ?>"
+                                title="<?php echo (int)($c['cancelled_count'] ?? 0) > 0 ? htmlspecialchars(mgrMoney($c['cancelled_value'] ?? 0)) . ' discarded' : ''; ?>">
+                                <?php echo (int)($c['cancelled_count'] ?? 0); ?>
+                            </td>
+                            <?php endif; ?>
                         </tr>
                     <?php endforeach; ?>
                     </tbody>

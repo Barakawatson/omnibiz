@@ -78,11 +78,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         posFlash($ok ? 'success' : 'danger', $msg);
         header('Location: pos.php'); exit;
     }
-    if ($action === 'delete_held') {
-        posDeleteHeldSale($conn, (int)($_POST['held_id'] ?? 0));
-        posFlash('success', 'Held sale discarded.');
-        header('Location: pos.php'); exit;
-    }
+    // Discarding a held sale now always goes through
+    // api/pos-cancel-cart.php (mandatory reason + cancelled_carts audit
+    // row, written before the held sale is deleted) - there is
+    // deliberately no page-POST path left that can drop one silently.
 }
 
 // Stock nearing its expiry date, marked down automatically and shown on
@@ -1255,15 +1254,68 @@ $tillStmt->close();
                                 onclick='resumeHeld(<?php echo (int)$h["id"]; ?>, <?php echo json_encode($h["cart_json"], JSON_HEX_APOS | JSON_HEX_QUOT); ?>)'>
                             Resume
                         </button>
-                        <form method="post" onsubmit="return confirm('Discard this held sale?');">
-<?php echo csrfField(); ?>
-                            <input type="hidden" name="action" value="delete_held">
-                            <input type="hidden" name="held_id" value="<?php echo (int)$h['id']; ?>">
-                            <button class="btn btn-sm btn-outline-danger" style="border-radius:8px;"><i class="fas fa-trash"></i></button>
-                        </form>
+                        <button type="button" class="btn btn-sm btn-outline-danger" style="border-radius:8px;"
+                                onclick='openCancelModal("held_sale", <?php echo (int)$h["id"]; ?>, <?php echo json_encode($h["cart_json"], JSON_HEX_APOS | JSON_HEX_QUOT); ?>, <?php echo (float)$h["total_estimate"]; ?>)'>
+                            <i class="fas fa-trash"></i>
+                        </button>
                     </div>
                 </div>
                 <?php endforeach; ?>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ============ Cancel cart / discard held sale - mandatory reason ============
+     One shared modal for every way a cart can be discarded without becoming
+     a sale: the Clear Cart button, the last line item being removed, and
+     discarding a held sale. Every path writes a cancelled_carts row via
+     api/pos-cancel-cart.php before anything actually disappears. -->
+<div class="modal fade" id="cancelCartModal" tabindex="-1">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content" style="border-radius:14px;">
+            <form id="cancelCartForm">
+                <div class="modal-header">
+                    <h5 class="modal-title"><i class="fas fa-triangle-exclamation me-2" style="color:#c0392b;"></i>Cancel this cart?</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <p class="small text-muted mb-2">This is recorded for the shop's records. A reason is required.</p>
+                    <label class="form-label">Reason</label>
+                    <select id="cancelReasonCode" class="form-select mb-2" style="border-radius:8px;" required>
+                        <option value="">Choose a reason&hellip;</option>
+                        <option value="customer_changed_mind">Customer changed mind</option>
+                        <option value="wrong_items_scanned">Wrong items scanned</option>
+                        <option value="price_dispute">Price dispute</option>
+                        <option value="customer_left">Customer left</option>
+                        <option value="duplicate_test_scan">Duplicate / test scan</option>
+                        <option value="other">Other</option>
+                    </select>
+                    <input type="text" id="cancelReasonDetail" class="form-control" style="border-radius:8px;display:none;"
+                           placeholder="Please describe the reason" maxlength="255">
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Keep cart</button>
+                    <button type="submit" class="btn btn-danger" style="border-radius:10px;">Confirm cancellation</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- ============ Restore a cart found from before an unexpected reload ============ -->
+<div class="modal fade" id="restoreCartModal" tabindex="-1" data-bs-backdrop="static" data-bs-keyboard="false">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content" style="border-radius:14px;">
+            <div class="modal-header">
+                <h5 class="modal-title"><i class="fas fa-clock-rotate-left me-2"></i>Restore your previous cart?</h5>
+            </div>
+            <div class="modal-body">
+                <p id="restoreCartSummary" class="mb-0"></p>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-danger" id="restoreCartDiscardBtn">No, discard it</button>
+                <button type="button" class="btn btn-success" id="restoreCartYesBtn">Yes, restore it</button>
             </div>
         </div>
     </div>
@@ -1517,7 +1569,20 @@ function addToCart(id, name, price, stock, qty = 1) {
 function setQty(id, qty) {
     const line = cart.find(l => l.id === id);
     if (!line) return;
-    if (qty <= 0) { cart = cart.filter(l => l.id !== id); }
+    if (qty <= 0) {
+        // Removing the LAST line empties the cart, same as Clear Cart -
+        // require the same reason before anything actually changes.
+        // Removing one of several lines needs no prompt; the cart itself
+        // isn't being discarded.
+        if (cart.length === 1) {
+            openCancelModal('live_cart', null, cart, totals().grand, () => {
+                cart = cart.filter(l => l.id !== id);
+                renderCart();
+            });
+            return;
+        }
+        cart = cart.filter(l => l.id !== id);
+    }
     else if (qty > line.stock) { beep(false); toast('Only ' + line.stock + ' in stock.', false); return; }
     else { line.qty = qty; }
     renderCart();
@@ -1528,10 +1593,169 @@ function clearCart(silent) {
     resumedHeldId = 0;
     document.getElementById('discInput').value = 0;
     clearPayments();
+    clearCartShadow();
     renderCart();
     if (!silent) toast('Cart cleared.');
     focusScanner();
 }
+
+/* ---------------------------------------------------------------
+   CANCEL / DISCARD - mandatory reason, shared by the Clear Cart
+   button, the last line item being removed (see setQty()), and
+   discarding a held sale. Nothing actually disappears until
+   api/pos-cancel-cart.php confirms the audit row was written.
+   --------------------------------------------------------------- */
+let cancelCtx = null;
+
+function openCancelModal(source, heldSaleId, items, total, onConfirmed) {
+    // Held-sale items arrive as a JSON STRING (same shape resumeHeld()
+    // already unpacks); the live cart passes the real array directly.
+    let parsedItems = items;
+    if (typeof items === 'string') {
+        try { parsedItems = JSON.parse(items) || []; } catch (e) { parsedItems = []; }
+    }
+    cancelCtx = { source, heldSaleId: heldSaleId || null, items: parsedItems || [], total: total || 0, onConfirmed: onConfirmed || null };
+    document.getElementById('cancelReasonCode').value = '';
+    document.getElementById('cancelReasonDetail').value = '';
+    document.getElementById('cancelReasonDetail').style.display = 'none';
+    bootstrap.Modal.getOrCreateInstance(document.getElementById('cancelCartModal')).show();
+}
+
+document.getElementById('cancelReasonCode').addEventListener('change', function () {
+    document.getElementById('cancelReasonDetail').style.display = this.value === 'other' ? 'block' : 'none';
+});
+
+document.getElementById('cancelCartForm').addEventListener('submit', function (e) {
+    e.preventDefault();
+    if (!cancelCtx) return;
+    const reasonCode = document.getElementById('cancelReasonCode').value;
+    const reasonDetail = document.getElementById('cancelReasonDetail').value.trim();
+    if (!reasonCode) { toast('Choose a reason.', false); return; }
+    if (reasonCode === 'other' && !reasonDetail) { toast('Enter a reason.', false); return; }
+
+    fetch('api/pos-cancel-cart.php', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF_TOKEN },
+        body: JSON.stringify({
+            source: cancelCtx.source,
+            held_sale_id: cancelCtx.heldSaleId,
+            items: cancelCtx.items,
+            total: cancelCtx.total,
+            reason_code: reasonCode,
+            reason_detail: reasonDetail,
+            terminal_id: <?php echo (int)$terminalId; ?>
+        })
+    })
+    .then(r => r.json())
+    .then(d => {
+        bootstrap.Modal.getInstance(document.getElementById('cancelCartModal'))?.hide();
+        if (!d.ok) { toast(d.message || 'Could not record the cancellation.', false); return; }
+        const ctx = cancelCtx;
+        cancelCtx = null;
+        if (ctx.source === 'held_sale') {
+            toast('Held sale discarded.');
+            location.reload();
+            return;
+        }
+        if (ctx.onConfirmed) { ctx.onConfirmed(); } else { clearCart(true); }
+        toast('Cart cancelled.');
+    })
+    .catch(() => { toast('Network error - nothing was changed.', false); });
+});
+
+/* ---------------------------------------------------------------
+   CART PERSISTENCE (this browser only)
+   ---------------------------------------------------------------
+   A same-device safety net for an accidental refresh or crash,
+   layered on top of - not replacing - the server-side Hold Sale
+   mechanism (which is still how a cashier deliberately parks a sale
+   to serve someone else, and survives a different device/terminal).
+   Nothing here is sent anywhere until checkout or an explicit hold.
+   --------------------------------------------------------------- */
+const CART_SHADOW_KEY = 'mxPosCartShadow_<?php echo (int)$terminalId; ?>';
+let shadowSaveTimer = null;
+
+function saveCartShadow() {
+    clearTimeout(shadowSaveTimer);
+    shadowSaveTimer = setTimeout(function () {
+        try {
+            if (!cart.length) { localStorage.removeItem(CART_SHADOW_KEY); return; }
+            localStorage.setItem(CART_SHADOW_KEY, JSON.stringify({
+                cart: cart,
+                discount: document.getElementById('discInput').value,
+                resumedHeldId: resumedHeldId,
+                custType: document.getElementById('custType').value,
+                custName: document.getElementById('custName').value,
+                custPhone: document.getElementById('custPhone').value,
+                custAddress: document.getElementById('custAddress').value,
+                custTin: document.getElementById('custTin').value,
+                custEmail: document.getElementById('custEmail').value,
+                savedAt: Date.now()
+            }));
+        } catch (e) {}
+    }, 250);
+}
+
+function clearCartShadow() {
+    try { localStorage.removeItem(CART_SHADOW_KEY); } catch (e) {}
+}
+
+// Offer to restore a shadow copy left behind by an accidental
+// refresh/crash. A cart older than one shift is stale, not a recovery
+// candidate, so it's silently dropped rather than offered back.
+(function checkCartShadow() {
+    let shadow = null;
+    try { shadow = JSON.parse(localStorage.getItem(CART_SHADOW_KEY)); } catch (e) { shadow = null; }
+    if (!shadow || !Array.isArray(shadow.cart) || !shadow.cart.length) return;
+    if (Date.now() - (shadow.savedAt || 0) > 12 * 60 * 60 * 1000) { clearCartShadow(); return; }
+
+    document.getElementById('restoreCartSummary').textContent =
+        shadow.cart.length + ' item(s), ' + money(shadow.cart.reduce((s, l) => s + l.price * l.qty, 0)) +
+        ' - left behind by an interrupted session.';
+    const modalEl = document.getElementById('restoreCartModal');
+    const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+
+    document.getElementById('restoreCartYesBtn').onclick = function () {
+        cart = shadow.cart;
+        resumedHeldId = shadow.resumedHeldId || 0;
+        document.getElementById('discInput').value = shadow.discount || 0;
+        if (shadow.custType) {
+            document.getElementById('custType').value = shadow.custType;
+            document.getElementById('custFields').style.display = shadow.custType === 'registered' ? 'block' : 'none';
+        }
+        document.getElementById('custName').value = shadow.custName || '';
+        document.getElementById('custPhone').value = shadow.custPhone || '';
+        document.getElementById('custAddress').value = shadow.custAddress || '';
+        document.getElementById('custTin').value = shadow.custTin || '';
+        document.getElementById('custEmail').value = shadow.custEmail || '';
+        renderCart();
+        modal.hide();
+        toast('Cart restored.');
+    };
+    document.getElementById('restoreCartDiscardBtn').onclick = function () {
+        // Discarding it is a cancellation like any other - it goes
+        // through the same audited path, never a silent localStorage clear.
+        clearCartShadow();
+        modal.hide();
+        openCancelModal('live_cart', null, shadow.cart,
+            shadow.cart.reduce((s, l) => s + l.price * l.qty, 0), null);
+    };
+    modal.show();
+})();
+
+// Warn before leaving with a sale in progress. Modern browsers show
+// their own generic confirmation and ignore any custom message - setting
+// returnValue is what triggers it, the text itself is never shown. F5 /
+// Ctrl+R cannot be reliably intercepted in any browser, so no attempt is
+// made to block them; the shadow-copy above is what actually protects
+// the sale, not this dialog.
+window.addEventListener('beforeunload', function (e) {
+    if (cart.length > 0) {
+        e.preventDefault();
+        e.returnValue = '';
+    }
+});
 
 /* ---------------------------------------------------------------
    PAYMENT
@@ -1623,6 +1847,7 @@ function renderCart() {
     document.getElementById('tGrand').textContent = money(t.grand);
     updateChange();
     document.getElementById('completeBtn').disabled = cart.length === 0;
+    saveCartShadow();
 }
 
 function updateChange() {
@@ -1891,7 +2116,7 @@ document.getElementById('custPhone').addEventListener('blur', function() {
 // ---------------------------------------------------------------
 document.getElementById('clearBtn').addEventListener('click', () => {
     if (!cart.length) return;
-    if (confirm('Clear the whole cart?')) clearCart();
+    openCancelModal('live_cart', null, cart, totals().grand, null);
 });
 
 document.getElementById('holdBtn').addEventListener('click', () => {

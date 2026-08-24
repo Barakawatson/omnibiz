@@ -47,23 +47,41 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     // Enforced here, before any handler. Hiding the buttons is a courtesy
     // to the user, not a security control - a forged POST from a
     // storekeeper's session is refused just the same, and logged.
-    $needsApproval = ($action === 'approve' || $action === 'payment'
+    $needsApproval = ($action === 'approve' || $action === 'payment' || $action === 'set_due_date'
                       || ($action === 'cancel' && $po['status'] === 'approved'));
     if ($needsApproval && !$canApprove) {
         invAudit($conn, $userId, 'denied_' . $action, 'purchase_order', $poId, $po['po_number']);
         invFlash('danger', 'Only a manager or administrator can '
             . ($action === 'payment' ? 'record a payment to a supplier.'
+               : ($action === 'set_due_date' ? 'change the payment due date.'
                : ($action === 'cancel' ? 'cancel an approved order.'
-                                       : 'approve a purchase order.')));
+                                       : 'approve a purchase order.'))));
         header('Location: inventory-po-view.php?id=' . $poId);
         exit;
     }
 
     if ($action === 'approve' && $po['status'] === 'draft') {
-        $stmt = $conn->prepare("UPDATE inv_purchase_orders SET status='approved', approved_by=? WHERE id=?");
-        $stmt->bind_param('ii', $userId, $poId); $stmt->execute(); $stmt->close();
+        // Due date is informational (nothing enforces it) - defaulted
+        // from the order date + the shop's standard payment terms, but
+        // never overwritten if one was already set by hand beforehand.
+        $dueDate = $po['due_date'];
+        if (!$dueDate) {
+            $termsDays = (int)getInvSetting($conn, 'default_payment_terms_days', '30');
+            $baseDate = $po['order_date'] ?: date('Y-m-d');
+            $dueDate = date('Y-m-d', strtotime($baseDate . ' + ' . $termsDays . ' days'));
+        }
+        $stmt = $conn->prepare("UPDATE inv_purchase_orders SET status='approved', approved_by=?, due_date=? WHERE id=?");
+        $stmt->bind_param('isi', $userId, $dueDate, $poId); $stmt->execute(); $stmt->close();
         invAudit($conn, $userId, 'approve', 'purchase_order', $poId, $po['po_number']);
         invFlash('success', 'Purchase order approved.');
+    }
+    elseif ($action === 'set_due_date') {
+        $newDue = trim($_POST['due_date'] ?? '');
+        $newDue = ($newDue !== '' && strtotime($newDue) !== false) ? $newDue : null;
+        $stmt = $conn->prepare("UPDATE inv_purchase_orders SET due_date=? WHERE id=?");
+        $stmt->bind_param('si', $newDue, $poId); $stmt->execute(); $stmt->close();
+        invAudit($conn, $userId, 'due_date_update', 'purchase_order', $poId, $po['po_number'] . ' - ' . ($newDue ?: 'cleared'));
+        invFlash('success', 'Due date updated.');
     }
     elseif ($action === 'cancel' && in_array($po['status'], ['draft','approved'], true)) {
         $stmt = $conn->prepare("UPDATE inv_purchase_orders SET status='cancelled' WHERE id=?");
@@ -139,7 +157,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         // transaction inside poReceiveStock().
         [$ok, $msg] = poReceiveStock(
             $conn, $poId, (array)($_POST['receive'] ?? []),
-            $userId, $userName, trim($_POST['receipt_note'] ?? '')
+            $userId, $userName, trim($_POST['receipt_note'] ?? ''),
+            (array)($_POST['expiry'] ?? [])
         );
         invFlash($ok ? 'success' : 'danger', $ok ? $msg : 'Receive failed: ' . $msg);
     }
@@ -238,6 +257,24 @@ include 'inventory-header.php';
             <div class="d-flex justify-content-between py-1 border-bottom"><span class="text-muted small">Order date</span><span><?php echo $po['order_date'] ? date('d M Y', strtotime($po['order_date'])) : '—'; ?></span></div>
             <div class="d-flex justify-content-between py-1 border-bottom"><span class="text-muted small">Expected</span><span><?php echo $po['expected_date'] ? date('d M Y', strtotime($po['expected_date'])) : '—'; ?></span></div>
             <div class="d-flex justify-content-between py-1 border-bottom"><span class="text-muted small">Received</span><span><?php echo $po['received_date'] ? date('d M Y', strtotime($po['received_date'])) : '—'; ?></span></div>
+            <div class="d-flex justify-content-between align-items-center py-1 border-bottom">
+                <span class="text-muted small">Payment due</span>
+                <?php if ($po['due_date'] && strtotime($po['due_date']) < strtotime(date('Y-m-d')) && $po['payment_status'] !== 'paid'): ?>
+                    <span class="text-danger fw-bold"><?php echo date('d M Y', strtotime($po['due_date'])); ?> (overdue)</span>
+                <?php else: ?>
+                    <span><?php echo $po['due_date'] ? date('d M Y', strtotime($po['due_date'])) : '—'; ?></span>
+                <?php endif; ?>
+            </div>
+            <?php if ($canApprove): ?>
+            <form method="post" class="d-flex gap-1 align-items-center py-1">
+<?php echo csrfField(); ?>
+                <input type="hidden" name="action" value="set_due_date">
+                <input type="hidden" name="po_id" value="<?php echo $poId; ?>">
+                <input type="date" name="due_date" value="<?php echo htmlspecialchars($po['due_date'] ?? ''); ?>"
+                       class="form-control form-control-sm" style="max-width:150px;">
+                <button class="btn btn-sm btn-outline-secondary">Set</button>
+            </form>
+            <?php endif; ?>
             <?php if (!empty($po['notes'])): ?><div class="pt-2 small text-muted"><?php echo nl2br(htmlspecialchars($po['notes'])); ?></div><?php endif; ?>
         </div>
 
@@ -364,15 +401,18 @@ include 'inventory-header.php';
                         Enter the quantity received for each item. Stock increases immediately, and the
                         value received is posted to the ledger as
                         <strong>Inventory Asset</strong> owed to <strong>Accounts Payable</strong>.
+                        An expiry date is optional per line and dates this delivery's own batch,
+                        distinct from anything already on the shelf.
                     </p>
                     <table class="table table-sm align-middle">
-                        <thead><tr><th>Item</th><th class="text-end">Remaining</th><th style="width:120px;">Receive</th></tr></thead>
+                        <thead><tr><th>Item</th><th class="text-end">Remaining</th><th style="width:110px;">Receive</th><th style="width:150px;">Expiry <span class="text-muted">(optional)</span></th></tr></thead>
                         <tbody>
                         <?php foreach ($lines as $ln): $remaining = (float)$ln['quantity'] - (float)$ln['received_qty']; ?>
                             <tr>
                                 <td><?php echo htmlspecialchars($ln['item_name']); ?></td>
                                 <td class="text-end"><?php echo invQty($remaining) . ' ' . htmlspecialchars($ln['unit_abbr'] ?: ''); ?></td>
                                 <td><input type="number" step="0.001" min="0" max="<?php echo $remaining; ?>" name="receive[<?php echo $ln['id']; ?>]" class="form-control form-control-sm" value="<?php echo $remaining > 0 ? invQty($remaining) : 0; ?>" <?php echo $remaining <= 0 ? 'disabled' : ''; ?>></td>
+                                <td><input type="date" name="expiry[<?php echo $ln['id']; ?>]" class="form-control form-control-sm" <?php echo $remaining <= 0 ? 'disabled' : ''; ?>></td>
                             </tr>
                         <?php endforeach; ?>
                         </tbody>

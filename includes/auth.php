@@ -46,7 +46,7 @@ function roleLabel(string $role): string {
  *   products, inventory, purchasing, barcode, stock_requests,
  *   customers, accounting, accounting_manage, reports, users,
  *   settings, departments, shop_settings, disposal_approve,
- *   expiry_alerts
+ *   expiry_alerts, supplier_liabilities, fraud_audit
  */
 function roleModules(string $role): array {
     switch ($role) {
@@ -56,16 +56,19 @@ function roleModules(string $role): array {
             // what the business sells, not day-to-day management.
             // 'disposal_approve' mirrors 'purchasing_approve': approving a
             // write-off authorizes a loss, it isn't operational work.
+            // 'fraud_audit' (Cancelled Carts) is a supervisor key, held by
+            // admin and manager - a cashier or storekeeper never sees it.
             return ['dashboard','manager_overview','pos','pos_sales','pos_void','products',
                     'inventory','purchasing','purchasing_approve','barcode','stock_requests','customers',
                     'accounting','accounting_manage','reports','users','settings','departments',
-                    'shop_settings','disposal_approve','expiry_alerts'];
+                    'shop_settings','disposal_approve','expiry_alerts','supplier_liabilities','fraud_audit'];
         case 'manager':
             // Everything operational plus overrides and reports, but the
             // chart of accounts itself stays an admin-only structure.
             return ['dashboard','manager_overview','pos','pos_sales','pos_void','products',
                     'inventory','purchasing','purchasing_approve','barcode','stock_requests','customers',
-                    'accounting','reports','users','settings','disposal_approve','expiry_alerts'];
+                    'accounting','reports','users','settings','disposal_approve','expiry_alerts',
+                    'supplier_liabilities','fraud_audit'];
         case 'storekeeper':
             // 'purchasing' lets a storekeeper raise a purchase order and
             // book goods in when they arrive - their job. It deliberately
@@ -73,7 +76,11 @@ function roleModules(string $role): array {
             // commits the shop to spending, and recording a payment moves
             // real money out of an account. Both are a supervisor's
             // decision, so only admin and manager hold that key.
-            return ['products','inventory','purchasing','barcode','stock_requests','expiry_alerts'];
+            // 'supplier_liabilities' is granted read-only here (enforced
+            // by the page itself, not by a separate module key) so a
+            // storekeeper can see what's owed without being able to pay it.
+            return ['products','inventory','purchasing','barcode','stock_requests','expiry_alerts',
+                    'supplier_liabilities'];
         case 'cashier':
             return ['pos','pos_sales','customers','stock_requests','expiry_alerts'];
         default:

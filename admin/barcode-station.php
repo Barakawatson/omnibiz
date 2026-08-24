@@ -182,6 +182,13 @@ include 'inventory-header.php';
             <label class="form-label">Unit cost (optional)</label>
             <input type="number" step="0.01" min="0" id="costInput" class="form-control mb-2" placeholder="0.00" style="border-radius:10px;">
             <div class="form-text mb-2">Filling this in updates the item's weighted-average cost.</div>
+
+            <label class="form-label">Expiry date <span class="text-muted">(optional)</span></label>
+            <input type="date" id="expiryInput" class="form-control mb-2" style="border-radius:10px;">
+            <div class="form-text mb-2">
+                Leave blank for non-perishable goods. Filling this in dates the new
+                batch and keeps this item's expiry status accurate for pricing and the till.
+            </div>
             <?php endif; ?>
 
             <label class="form-label">Reason / note (optional)</label>
@@ -258,7 +265,7 @@ $pageScript = <<<HTML
     // quantity, then scan" - so focus is often left in qtyInput when the
     // operator fires the scanner. Exempting these from the "typing
     // elsewhere" guard below is what lets scanning work from them too.
-    const OWN_FIELDS = ['qtyInput', 'costInput', 'reasonInput'];
+    const OWN_FIELDS = ['qtyInput', 'costInput', 'expiryInput', 'reasonInput'];
 
     const MODE = '{$mode}';
     const CSRF_TOKEN = '{$csrfToken}';
@@ -314,6 +321,7 @@ $pageScript = <<<HTML
         }
         busy = true;
         const costEl = document.getElementById('costInput');
+        const expiryEl = document.getElementById('expiryInput');
 
         fetch('api/inventory-stock-in.php', {
             method: 'POST',
@@ -324,6 +332,7 @@ $pageScript = <<<HTML
                 quantity: qty,
                 mode: MODE,
                 unit_cost: costEl ? (parseFloat(costEl.value) || 0) : 0,
+                expiry_date: expiryEl ? expiryEl.value : '',
                 reason: document.getElementById('reasonInput').value
             })
         })

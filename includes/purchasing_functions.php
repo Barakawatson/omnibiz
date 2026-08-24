@@ -60,6 +60,8 @@ function poNextSequential(mysqli $conn, string $table, string $column, string $p
  * $quantities: [po_line_id => qty]. Anything above what is still
  * outstanding on a line is trimmed down rather than rejected, so a
  * fat-fingered entry can never inflate stock beyond what was ordered.
+ * $expiryDates: [po_line_id => 'YYYY-MM-DD'], optional per line - not
+ * every item received is perishable.
  *
  * Stock movements, the receipt record, the PO status and the ledger
  * entry all happen in ONE transaction: if the books refuse the receipt,
@@ -67,7 +69,7 @@ function poNextSequential(mysqli $conn, string $table, string $column, string $p
  *
  * Returns [ok, message, receiptId].
  */
-function poReceiveStock(mysqli $conn, int $poId, array $quantities, ?int $userId, string $userName, string $note = ''): array {
+function poReceiveStock(mysqli $conn, int $poId, array $quantities, ?int $userId, string $userName, string $note = '', array $expiryDates = []): array {
     $stmt = $conn->prepare("SELECT po.*, s.name AS supplier_name FROM inv_purchase_orders po
         LEFT JOIN inv_suppliers s ON s.id = po.supplier_id
         WHERE po.id = ? AND po.deleted_at IS NULL");
@@ -106,11 +108,14 @@ function poReceiveStock(mysqli $conn, int $poId, array $quantities, ?int $userId
             if (!$ok) { throw new Exception($msg); }
 
             // Store the line data for batch creation after receipt ID is available.
+            $lineExpiry = trim((string)($expiryDates[$ln['id']] ?? ''));
+            $lineExpiry = ($lineExpiry !== '' && strtotime($lineExpiry) !== false) ? $lineExpiry : null;
             $receivedLines[] = [
                 'item_id' => (int)$ln['item_id'],
                 'line_id' => (int)$ln['id'],
                 'qty' => $take,
                 'unit_price' => $unitPrice,
+                'expiry_date' => $lineExpiry,
             ];
 
             $upd = $conn->prepare("UPDATE inv_purchase_order_lines SET received_qty = received_qty + ? WHERE id = ?");
@@ -139,14 +144,22 @@ function poReceiveStock(mysqli $conn, int $poId, array $quantities, ?int $userId
 
         // Create batches for each received line (now that receipt ID is available).
         require_once __DIR__ . '/inv_batches_functions.php';
+        $receivedItemIds = [];
         foreach ($receivedLines as $rl) {
             $batchNo = 'PO-' . $po['po_number'] . '-L' . $rl['line_id'];
             [$bOk, $bMsg, $batchId] = createBatch(
                 $conn, $rl['item_id'], $batchNo, $rl['qty'], $rl['unit_price'],
-                null, 'purchase_order', $receiptId
+                $rl['expiry_date'], 'purchase_order', $receiptId
             );
             // Non-fatal: if batch creation fails, the stock movement still succeeded.
             if (!$bOk) { error_log("Batch creation failed for PO line {$rl['line_id']}: $bMsg"); }
+            $receivedItemIds[$rl['item_id']] = true;
+        }
+        // Keep each received item's own expiry_date - what pricing and the
+        // checkout block actually read - in step with its batches now that
+        // a dated (or undated) batch has just arrived.
+        foreach (array_keys($receivedItemIds) as $itemId) {
+            refreshItemExpiryFromBatches($conn, (int)$itemId);
         }
 
         // The ledger half. Inside this transaction on purpose.

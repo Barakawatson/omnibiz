@@ -129,6 +129,18 @@ function reportCatalogue(): array {
                 ['daily_close',    'Daily close history', 'Z-report closes, with each day\'s variance.'],
             ],
         ],
+        // Supervisor oversight of staff (admin/manager only - never
+        // cashier or storekeeper), not an operational report -
+        // deliberately its own group so its module key ('fraud_audit')
+        // can be gated independently of the other groups here.
+        'audit' => [
+            'label' => 'Audit', 'icon' => 'fa-shield-halved', 'accent' => 'account',
+            'blurb' => 'Oversight of staff actions that never became a sale.',
+            'module' => 'fraud_audit',
+            'reports' => [
+                ['cancelled_carts', 'Cancelled carts', 'Every cart or held sale discarded, with the reason given.'],
+            ],
+        ],
     ];
 }
 

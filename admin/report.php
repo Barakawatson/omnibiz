@@ -743,6 +743,48 @@ case 'accounting.daily_close':
                  abs($tV) < 0.005 ? 'is-good' : 'is-warn']];
     break;
 
+case 'audit.cancelled_carts':
+    // A cart that never became a sale - Clear Cart, the last item
+    // removed, or a held sale discarded - each with the reason the
+    // cashier gave. Straight off cancelled_carts; nothing recomputed.
+    $supports = ['cashier'];
+    $columns = ['Date & time', 'Cashier', 'Source', 'Reason', 'Items', 'Value'];
+    $align = [4 => 1, 5 => 1];
+    $reasonLabels = [
+        'customer_changed_mind' => 'Customer changed mind',
+        'wrong_items_scanned'   => 'Wrong items scanned',
+        'price_dispute'         => 'Price dispute',
+        'customer_left'         => 'Customer left',
+        'duplicate_test_scan'   => 'Duplicate / test scan',
+        'other'                 => 'Other',
+    ];
+    $w = 'c.created_at BETWEEN ? AND ?'; $ty = 'ss'; $pa = [$fromDT, $toDT];
+    if ($fCashier > 0) { $w .= ' AND c.cashier_id = ?'; $ty .= 'i'; $pa[] = $fCashier; }
+    [$rows_raw, $totalRows] = rqPaged($conn,
+        "SELECT c.* FROM cancelled_carts c WHERE $w ORDER BY c.created_at DESC, c.id DESC",
+        $ty, $pa, $page, $perPage, $isExport, $exportCap);
+    $tV = 0.0; $tItems = 0;
+    foreach ($rows_raw as $r) {
+        $tV += (float)$r['total_value'];
+        $tItems += (int)$r['item_count'];
+        $reason = $reasonLabels[$r['reason_code']] ?? ucfirst(str_replace('_', ' ', $r['reason_code']));
+        if ($r['reason_detail']) { $reason .= ' — ' . $r['reason_detail']; }
+        $rows[] = [
+            date('d M Y H:i', strtotime($r['created_at'])),
+            $r['cashier_name'] ?: 'Unknown',
+            $r['source'] === 'held_sale' ? 'Held sale' : 'Live cart',
+            $reason,
+            q($r['item_count']),
+            m($r['total_value']),
+        ];
+    }
+    $footer = ['Total', '', '', '', q($tItems), m($tV)];
+    $metrics = [
+        ['Cancellations', number_format(count($rows_raw)), '', ''],
+        ['Value discarded', 'Tsh ' . m($tV), '', $tV > 0 ? 'is-bad' : ''],
+    ];
+    break;
+
 default:
     $error = 'That report is not available.';
 }
