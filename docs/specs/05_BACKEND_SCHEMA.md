@@ -1,6 +1,6 @@
 # Backend Schema
 
-33 tables, database `retailer_shop`, MariaDB 10.4. Every table is created and versioned by a self-installing schema file (`includes/*_schema.php`) — this document describes the **result**, not how to write the migrations; see TRD §3.1 for that.
+34 tables, database `retailer_shop`, MariaDB 10.4. Every table is created and versioned by a self-installing schema file (`includes/*_schema.php`) — this document describes the **result**, not how to write the migrations; see TRD §3.1 for that.
 
 Money: `DECIMAL(14,2)`. Quantities: `DECIMAL(14,3)`. Unit costs: `DECIMAL(14,4)`. Timezone `Africa/Dar_es_Salaam` throughout.
 
@@ -12,7 +12,7 @@ Money: `DECIMAL(14,2)`. Quantities: `DECIMAL(14,3)`. Unit costs: `DECIMAL(14,4)`
 |---|---|---|
 | `admin` | Staff accounts | `role` ∈ {admin, manager, storekeeper, cashier} |
 | `admin_remember_tokens` | Rotating persistent-login tokens (selector/validator, hashed) | → `admin.id` |
-| `customer` | name + phone only, identified by phone | referenced by `sales_transactions.customer_id` (nullable — most sales are walk-in) |
+| `customer` | name + phone, identified by phone, plus optional address/TIN/email for institutional buyers | referenced by `sales_transactions.customer_id` (nullable — most sales are walk-in); the three optional fields are snapshotted onto the sale at checkout, not joined live |
 | `inv_settings` | Flat key/value store — schema versions, tax rate, expiry-discount config, currency, etc. | none (global) |
 | `shop_payment_methods` | Payment instructions printed on receipts (provider, number, account name, order, enabled) | independent of `sales_payments` (that's *how a sale was paid*; this is *what to tell a customer to pay to*) |
 | `inv_audit_log` | Who did what, when, to which entity | generic `(entity_type, entity_id)` |
@@ -44,7 +44,7 @@ inv_items  (the product/stock record — ONE row is both "the stock item" and "t
 
 `inv_stock_movements`: `item_id, movement_type` (`receive|issue|transfer|damage|expire|loss|adjust|return|opening`), `quantity_before, quantity_after, signed_qty, unit_cost, reason, reference_type, reference_id, created_by, created_at`. Written **only** by `recordStockMovement()` — see App Flow §4.
 
-`inv_batches` — table exists in the schema but is **never written to** by any code path today (documented limitation, not a bug).
+`inv_batches` — lot/batch-level FEFO tracking: `item_id, batch_no, quantity, unit_cost, expiry_date, status (active|depleted|expired|disposed), reference_type, reference_id, received_at`. Written by both stock-in paths (barcode station and PO receiving, each with an optional per-batch expiry date) and allocated oldest-expiry-first at checkout and count corrections. `inv_items.expiry_date` — the single field pricing and checkout-blocking actually read — is kept in step with "the earliest still-active batch's date" by `refreshItemExpiryFromBatches()` (`includes/inv_batches_functions.php`) every time a batch is created or its quantity/status changes; it is not itself batch-aware.
 
 ## 4. Purchasing
 
@@ -53,17 +53,21 @@ inv_suppliers
     │
     ▼
 inv_purchase_orders  (po_number, supplier_id, status: draft→approved→partially_received→
-    │                  received→cancelled, approved_by, invoice_file)
+    │                  received→cancelled, approved_by, invoice_file, due_date, payment_status:
+    │                  unpaid|partial|paid — derived, never typed in)
     │
     ├─ 1:N → inv_purchase_order_lines   (item_id, quantity_ordered, unit_cost, quantity_received)
     ├─ 1:N → inv_po_receipts             (one row per RECEIVING EVENT — a PO can be received
     │                                     in stages; each receipt event is its own idempotency
     │                                     source for the ledger)
     └─ 1:N → inv_po_payments             (one row per PAYMENT EVENT — same reasoning: a PO can
-                                          be paid in instalments)
+                                          be paid in instalments; `efd_receipt_file` is required
+                                          on the specific payment that fully settles the order)
 ```
 
 Two child event tables (receipts, payments) exist specifically because the ledger's idempotency key is `(source_type, source_id)` — anything that can legitimately happen more than once against the same parent needs its own row to key against.
+
+`due_date` is optional and purely informational (nothing enforces it) — defaulted from `order_date` + the `default_payment_terms_days` shop setting at approval time, editable afterward. It backs the Supplier Liabilities dashboard's aging view (a cross-PO, cross-supplier read of `inv_po_receipts`/`inv_po_payments`, not a new liability record — no schema exists for it beyond what these tables already carry).
 
 ## 5. Point of sale
 
@@ -72,9 +76,10 @@ pos_terminals  (name, code, department, location_id, is_active)
     │
     ▼
 sales_transactions  (receipt_no [MRT-YYYYMMDD-NNNXXX], terminal_id, department, cashier_id/name,
-    │                 customer_type, customer_id/name/phone, subtotal, discount, tax_rate,
-    │                 tax_amount, total, total_cost, gross_profit, amount_paid, change_due,
-    │                 payment_method|'split', status: completed|voided, void_reason, voided_by/at)
+    │                 customer_type, customer_id/name/phone, customer_tin/address/email,
+    │                 subtotal, discount, tax_rate, tax_amount, total, total_cost, gross_profit,
+    │                 amount_paid, change_due, payment_method|'split', status: completed|voided,
+    │                 void_reason, voided_by/at)
     │
     ├─ 1:N → sales_transaction_items  (item_id, item_name, barcode, department, quantity,
     │                                  unit_price, unit_cost, line_discount, line_total —
@@ -86,7 +91,15 @@ sales_transactions  (receipt_no [MRT-YYYYMMDD-NNNXXX], terminal_id, department, 
 
 pos_held_sales  (cart_json, label, total, terminal_id, cashier — parked sales, no stock/ledger
                  effect until resumed and completed through the normal checkout path)
+
+cancelled_carts  (cashier_id/name, terminal_id, source: live_cart|held_sale, held_sale_id,
+                 reason_code, reason_detail, itemized_cart_json, item_count, total_value,
+                 created_at — a cart that never became a sale, written BEFORE a discarded held
+                 sale's pos_held_sales row is deleted, never after, so a held sale can never
+                 disappear unaudited)
 ```
+
+`customer.address/tin/email` (on the `customer` table itself) are what an organisation or government buyer's institutional details are stored against, keyed by phone as always; the three `customer_*` columns above are a SNAPSHOT of those details onto the sale at checkout time, for the same reason `item_name`/`barcode` are snapshotted — a later edit to the customer record must never rewrite an old receipt.
 
 **Receipt numbering is intentionally NOT a compliance-grade sequence:** it resets daily and includes 3 random characters so a customer cannot guess another customer's receipt number. (This becomes directly relevant if TRA fiscal integration is ever built — TRA's counters must be new, independent columns; see the TRA audit document §11.)
 

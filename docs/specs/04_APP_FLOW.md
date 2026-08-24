@@ -71,6 +71,10 @@ Cashier opens POS Terminal
 
 **Void variant** (Manager/Administrator only): `posVoidSale()` — same transactional shape in reverse: returns stock via `recordStockMovement()`, posts a mirror ledger entry (Sales Returns + Inventory / Cash + COGS), marks the sale voided. Idempotent — voiding twice does nothing the second time.
 
+**Cancellation variant** — a cart that never reaches Complete: clicking Clear Cart, removing the last line item, or discarding a parked held sale all now open one shared modal requiring a reason before anything actually disappears (cancelling out of the modal leaves the cart exactly as it was). Confirming calls `admin/api/pos-cancel-cart.php` → `posLogCancelledCart()`, which writes a `cancelled_carts` row and — only for a discarded held sale — deletes the `pos_held_sales` row inside the same transaction, so a held sale can never vanish unaudited. No stock or ledger effect either way; nothing was ever sold.
+
+**Refresh/crash recovery** — the live cart is mirrored to this browser's `localStorage` on every change (a same-device safety net, not a replacement for Hold Sale). Reloading the till with a mirrored cart present offers to restore it; choosing not to routes through the same cancellation flow above rather than silently discarding it. A `beforeunload` handler warns (the browser's own generic dialog — no page can customise that text) whenever the cart is non-empty; no attempt is made to intercept `F5`/`Ctrl+R`, which no browser lets a page block reliably.
+
 ## 3. Purchasing flow
 
 ```
@@ -83,16 +87,23 @@ Manager/Administrator: APPROVE          ← storekeeper cannot do this (purchasi
 Storekeeper: goods arrive → Receive Stock
       │        poReceiveStock() [transaction]
       │        ├─ recordStockMovement() (receive) → stock up, weighted-avg cost recalculated
+      │        ├─ optional per-line expiry date → dated inv_batches row; item's own expiry_date
+      │        │     resynced to the earliest still-active batch (refreshItemExpiryFromBatches())
       │        └─ accPostEntry() → DR Inventory Asset, CR Accounts Payable
       ▼
 Manager/Administrator: Record Payment to supplier   ← storekeeper cannot do this
       │        poRecordPayment() → DR Accounts Payable, CR Cash/Mobile/Bank
+      │        the PAYMENT THAT FULLY SETTLES the order is refused unless a supplier EFD
+      │        (TRA fiscal) receipt is attached first — an interim/partial payment may still
+      │        carry one, but isn't blocked without it
       ▼
 Order status becomes fully paid / partially paid, tracked against what was actually RECEIVED
 (not what was originally ordered)
 ```
 
 Cancelling a **draft** stays available to a storekeeper (nothing committed yet); cancelling an **approved** order requires the same approval key, since it reverses a commitment.
+
+**Supplier Liabilities view** (Finance section — admin/manager full, storekeeper read-only): aggregates every open PO's outstanding balance (billed − paid, the same arithmetic `poPaymentSummary()` already does per order) across suppliers, sorted by `due_date` where one is set. Recording a payment from this view still goes through `inventory-po-view.php`'s own payment modal — `poRecordPayment()` keeps exactly one call site.
 
 ## 4. Stock movement flow (every route, one gate)
 
@@ -169,7 +180,7 @@ Nightly (conceptually — actually evaluated live on every price lookup, no batc
 Reporting Centre (admin/reports.php) → pick group → pick report
    │
    ▼
-admin/report.php  (one renderer for all 23 reports)
+admin/report.php  (one renderer for all reports, grouped by module)
    ├─ report builds $columns / $rows / $footer / $align (+ optional $metrics/$chart/$supports)
    ├─ financial reports call the SAME functions the rest of the app uses
    │     (accProfitAndLoss(), accTrialBalance(), accGetJournal() …) — never reimplemented
