@@ -109,11 +109,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 $expiredItems = [];
 $batchRes = $conn->query(
     "SELECT b.id AS batch_id, b.item_id, b.batch_no, b.quantity, b.expiry_date,
-            i.name, i.sku, i.average_cost, u.abbreviation AS unit,
+            i.name, i.sku, i.barcode, i.average_cost, u.abbreviation AS unit, c.name AS category_name,
             DATEDIFF(CURDATE(), b.expiry_date) AS days_expired
      FROM inv_batches b
      JOIN inv_items i ON i.id = b.item_id
      LEFT JOIN inv_units u ON u.id = i.unit_id
+     LEFT JOIN inv_categories c ON c.id = i.category_id
      WHERE b.status = 'active' AND b.quantity > 0
        AND b.expiry_date IS NOT NULL AND b.expiry_date < CURDATE()
        AND i.deleted_at IS NULL AND i.status = 'active'"
@@ -121,16 +122,18 @@ $batchRes = $conn->query(
 if ($batchRes) {
     foreach ($batchRes->fetch_all(MYSQLI_ASSOC) as $b) {
         $expiredItems[] = [
-            'batch_id'     => (int)$b['batch_id'],
-            'item_id'      => (int)$b['item_id'],
-            'name'         => $b['name'],
-            'sku'          => $b['sku'],
-            'expiry_date'  => $b['expiry_date'],
-            'quantity'     => (float)$b['quantity'],
-            'average_cost' => (float)$b['average_cost'],
-            'unit'         => $b['unit'],
-            'days_expired' => (int)$b['days_expired'],
-            'batch_label'  => 'Batch ' . (($b['batch_no'] ?? '') !== '' ? $b['batch_no'] : ('#' . $b['batch_id'])),
+            'batch_id'      => (int)$b['batch_id'],
+            'item_id'       => (int)$b['item_id'],
+            'name'          => $b['name'],
+            'sku'           => $b['sku'],
+            'barcode'       => $b['barcode'],
+            'expiry_date'   => $b['expiry_date'],
+            'quantity'      => (float)$b['quantity'],
+            'average_cost'  => (float)$b['average_cost'],
+            'unit'          => $b['unit'],
+            'category_name' => $b['category_name'],
+            'days_expired'  => (int)$b['days_expired'],
+            'batch_label'   => 'Batch ' . (($b['batch_no'] ?? '') !== '' ? $b['batch_no'] : ('#' . $b['batch_id'])),
         ];
     }
 }
@@ -144,10 +147,13 @@ if ($batchRes) {
 // a legacy item with no batches at all still shows its full stock,
 // exactly as before this fix.
 $fallbackRes = $conn->query(
-    "SELECT i.id AS item_id, i.name, i.sku, i.expiry_date, i.current_stock, i.average_cost, u.abbreviation AS unit,
+    "SELECT i.id AS item_id, i.name, i.sku, i.barcode, i.expiry_date, i.current_stock, i.average_cost,
+            u.abbreviation AS unit, c.name AS category_name,
             DATEDIFF(CURDATE(), i.expiry_date) AS days_expired,
             COALESCE((SELECT SUM(b2.quantity) FROM inv_batches b2 WHERE b2.item_id = i.id AND b2.status = 'active'), 0) AS batch_covered
-     FROM inv_items i LEFT JOIN inv_units u ON u.id = i.unit_id
+     FROM inv_items i
+     LEFT JOIN inv_units u ON u.id = i.unit_id
+     LEFT JOIN inv_categories c ON c.id = i.category_id
      WHERE i.deleted_at IS NULL AND i.status = 'active'
        AND i.expiry_date IS NOT NULL AND i.expiry_date < CURDATE()
        AND i.current_stock > 0"
@@ -157,20 +163,41 @@ if ($fallbackRes) {
         $uncovered = (float)$f['current_stock'] - (float)$f['batch_covered'];
         if ($uncovered <= 0.0005) { continue; }
         $expiredItems[] = [
-            'batch_id'     => null,
-            'item_id'      => (int)$f['item_id'],
-            'name'         => $f['name'],
-            'sku'          => $f['sku'],
-            'expiry_date'  => $f['expiry_date'],
-            'quantity'     => $uncovered,
-            'average_cost' => (float)$f['average_cost'],
-            'unit'         => $f['unit'],
-            'days_expired' => (int)$f['days_expired'],
-            'batch_label'  => 'Untracked stock',
+            'batch_id'      => null,
+            'item_id'       => (int)$f['item_id'],
+            'name'          => $f['name'],
+            'sku'           => $f['sku'],
+            'barcode'       => $f['barcode'],
+            'expiry_date'   => $f['expiry_date'],
+            'quantity'      => $uncovered,
+            'average_cost'  => (float)$f['average_cost'],
+            'unit'          => $f['unit'],
+            'category_name' => $f['category_name'],
+            'days_expired'  => (int)$f['days_expired'],
+            'batch_label'   => 'Untracked stock',
         ];
     }
 }
 usort($expiredItems, function ($a, $b) { return strcmp($a['expiry_date'], $b['expiry_date']); });
+
+// Days-expired bucket, used by the Status filter below - every row on
+// this table is already "active & expired" (that's the query above),
+// so there is no other kind of status left to filter by here.
+foreach ($expiredItems as &$it) {
+    $d = $it['days_expired'];
+    $it['days_bucket'] = $d <= 7 ? '0-7' : ($d <= 14 ? '8-14' : ($d <= 30 ? '15-30' : '31+'));
+}
+unset($it);
+
+// Only offer categories that actually appear among expired items -
+// same "don't offer a filter with nothing behind it" principle the
+// reporting module follows.
+$expiredCategories = [];
+foreach ($expiredItems as $it) {
+    if ($it['category_name']) { $expiredCategories[$it['category_name']] = true; }
+}
+$expiredCategories = array_keys($expiredCategories);
+sort($expiredCategories);
 
 // The status is allow-listed AND bound. The allow-list is what keeps an
 // unknown value from silently returning nothing; binding is what keeps
@@ -228,15 +255,51 @@ include 'inventory-header.php';
 
 <div class="inv-card p-0 mb-4">
     <div class="p-3 border-bottom"><h6 class="mb-0 fw-bold"><i class="fas fa-calendar-xmark me-2" style="color:var(--inv-primary);"></i>Currently Expired, In Stock</h6></div>
+
+    <div class="p-3 border-bottom">
+        <div class="row g-2 align-items-end">
+            <div class="col-md-6">
+                <label class="form-label">Search</label>
+                <div class="input-group">
+                    <span class="input-group-text bg-white"><i class="fas fa-search"></i></span>
+                    <input type="text" id="expiredSearch" class="form-control" placeholder="Name, SKU or barcode...">
+                </div>
+            </div>
+            <div class="col-md-3">
+                <label class="form-label">Category</label>
+                <select id="expiredCategoryFilter" class="form-select">
+                    <option value="">All categories</option>
+                    <?php foreach ($expiredCategories as $cat): ?>
+                    <option value="<?php echo htmlspecialchars($cat); ?>"><?php echo htmlspecialchars($cat); ?></option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+            <div class="col-md-3">
+                <label class="form-label">Status</label>
+                <select id="expiredDaysFilter" class="form-select">
+                    <option value="">All</option>
+                    <option value="0-7">Expired 0-7 days ago</option>
+                    <option value="8-14">Expired 8-14 days ago</option>
+                    <option value="15-30">Expired 15-30 days ago</option>
+                    <option value="31+">Expired 31+ days ago</option>
+                </select>
+            </div>
+        </div>
+    </div>
+
     <div class="table-responsive">
-        <table class="inv-table">
+        <table class="inv-table" id="expiredStockTable">
             <thead><tr><th>Item</th><th>Batch</th><th>Expired</th><th class="text-end">Qty</th><th class="text-end">Est. Loss Value</th></tr></thead>
             <tbody>
             <?php if (!$expiredItems): ?>
-                <tr><td colspan="5"><div class="empty-state"><i class="fas fa-circle-check d-block"></i>Nothing currently expired is still in stock.</div></td></tr>
+                <tr data-mx-nofilter><td colspan="5"><div class="empty-state"><i class="fas fa-circle-check d-block"></i>Nothing currently expired is still in stock.</div></td></tr>
             <?php endif; ?>
-            <?php foreach ($expiredItems as $it): ?>
-                <tr>
+            <?php foreach ($expiredItems as $it):
+                $searchHay = strtolower(trim($it['name'] . ' ' . $it['sku'] . ' ' . $it['barcode']));
+            ?>
+                <tr data-search="<?php echo htmlspecialchars($searchHay, ENT_QUOTES); ?>"
+                    data-category="<?php echo htmlspecialchars($it['category_name'] ?? '', ENT_QUOTES); ?>"
+                    data-days-bucket="<?php echo $it['days_bucket']; ?>">
                     <td><?php echo htmlspecialchars($it['name']); ?><?php if ($it['sku']): ?> <span class="text-muted" style="font-size:.8rem;">(<?php echo htmlspecialchars($it['sku']); ?>)</span><?php endif; ?></td>
                     <td class="text-muted" style="font-size:.85rem;"><?php echo htmlspecialchars($it['batch_label']); ?></td>
                     <td><span class="inv-badge bg-danger text-white"><?php echo (int)$it['days_expired']; ?> day(s) ago</span></td>
@@ -246,6 +309,7 @@ include 'inventory-header.php';
             <?php endforeach; ?>
             </tbody>
         </table>
+        <div class="empty-state" id="expiredStockNoMatch" style="display:none;"><i class="fas fa-magnifying-glass d-block"></i>No expired stock matches these filters.</div>
     </div>
 </div>
 
@@ -440,6 +504,47 @@ function addDisposalLine() {
     document.getElementById('disposalLines').appendChild(tpl.content.cloneNode(true));
 }
 addDisposalLine();
+
+// Search + Category + Status(days-expired range) on the "Currently
+// Expired, In Stock" table - all three combine (AND), unlike the
+// single-criterion MX.filterTable()/chip helpers in ui.js, which only
+// ever apply one filter at a time and would clobber each other here.
+// No page reload: every row is already on the page, this only toggles
+// the same .mx-row-hidden class the shared filter component uses.
+(function () {
+    const searchInput = document.getElementById('expiredSearch');
+    const categorySelect = document.getElementById('expiredCategoryFilter');
+    const daysSelect = document.getElementById('expiredDaysFilter');
+    const rows = document.querySelectorAll('#expiredStockTable tbody tr[data-search]');
+    const noMatch = document.getElementById('expiredStockNoMatch');
+    if (!searchInput || !rows.length) { return; }
+
+    function applyExpiredFilters() {
+        const q = searchInput.value.trim().toLowerCase();
+        const cat = categorySelect.value;
+        const bucket = daysSelect.value;
+        let visible = 0;
+        rows.forEach(function (row) {
+            const show = (q === '' || row.dataset.search.indexOf(q) !== -1)
+                && (cat === '' || row.dataset.category === cat)
+                && (bucket === '' || row.dataset.daysBucket === bucket);
+            row.classList.toggle('mx-row-hidden', !show);
+            if (show) { visible++; }
+        });
+        if (noMatch) { noMatch.style.display = visible === 0 ? '' : 'none'; }
+    }
+
+    let searchTimer = null;
+    searchInput.addEventListener('input', function () {
+        clearTimeout(searchTimer);
+        searchTimer = setTimeout(applyExpiredFilters, 90);
+    });
+    searchInput.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape') { searchInput.value = ''; applyExpiredFilters(); }
+    });
+    categorySelect.addEventListener('change', applyExpiredFilters);
+    daysSelect.addEventListener('change', applyExpiredFilters);
+})();
 
 // Client-side hint only, from the chosen batch's own remaining quantity -
 // createDisposalRequest() re-locks and re-checks the real quantity

@@ -80,7 +80,13 @@ function reportCatalogue(): array {
         'sales' => [
             'label' => 'Sales', 'icon' => 'fa-cart-shopping', 'accent' => 'sales',
             'blurb' => 'What sold, who sold it and how it was paid for.',
-            'module' => 'pos_sales',
+            // 'sales_reports', not 'pos_sales' - the latter is the
+            // operational, own-till-only sales list a cashier legitimately
+            // needs; this shop-wide report group (every cashier compared,
+            // every terminal, full searchable history) is a supervisor/
+            // accounting view and must not follow along just because
+            // someone holds the till-scoped key.
+            'module' => 'sales_reports',
             'reports' => [
                 ['summary',       'Sales summary',      'Totals, discounts, tax and profit for a period, day by day.'],
                 ['by_product',    'Sales by product',   'Units and revenue per product, best first.'],

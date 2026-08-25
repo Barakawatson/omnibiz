@@ -18,6 +18,16 @@ if (!$sale) {
     echo 'Receipt not found.';
     exit;
 }
+// admin/pos-sales.php's own list already scopes a non-admin/manager to
+// their own sales (cashier_id = ?) - this page took an id straight from
+// the query string with no equivalent check, so any cashier could view
+// or print any other cashier's receipt just by editing ?id=.
+$role = $_SESSION['role'] ?? '';
+if (!in_array($role, ['admin', 'manager'], true) && (int)$sale['cashier_id'] !== (int)($_SESSION['id'] ?? 0)) {
+    http_response_code(403);
+    echo 'You do not have permission to view this receipt.';
+    exit;
+}
 
 $autoPrint = !isset($_GET['noprint']);
 $footer = posReceiptFooter($conn);

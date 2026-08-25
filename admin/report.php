@@ -769,8 +769,19 @@ case 'audit.cancelled_carts':
         $tItems += (int)$r['item_count'];
         $reason = $reasonLabels[$r['reason_code']] ?? ucfirst(str_replace('_', ' ', $r['reason_code']));
         if ($r['reason_detail']) { $reason .= ' — ' . $r['reason_detail']; }
+        // A held sale has TWO moments worth showing - when it was first
+        // parked and when it was later discarded - so both appear rather
+        // than picking one. A row from before held_since existed (or a
+        // live cart, which was never held at all) falls back to just the
+        // cancellation timestamp, same as before this column existed.
+        if ($r['source'] === 'held_sale' && !empty($r['held_since'])) {
+            $whenText = 'Held ' . date('d M Y H:i', strtotime($r['held_since']))
+                . ' · Cancelled ' . date('d M Y H:i', strtotime($r['created_at']));
+        } else {
+            $whenText = date('d M Y H:i', strtotime($r['created_at']));
+        }
         $rows[] = [
-            date('d M Y H:i', strtotime($r['created_at'])),
+            $whenText,
             $r['cashier_name'] ?: 'Unknown',
             $r['source'] === 'held_sale' ? 'Held sale' : 'Live cart',
             $reason,

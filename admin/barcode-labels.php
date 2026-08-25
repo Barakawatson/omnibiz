@@ -7,7 +7,10 @@
 // sticker sheet or a dedicated label printer.
 // ============================================================
 require_once '../includes/auth.php';
-requireModule('inventory');
+// 'barcode', not 'inventory' - already granted to the same three roles
+// (admin, manager, storekeeper); matches the sidebar link this page has
+// always had and the api/products-scan.php gate elsewhere.
+requireModule('barcode');
 date_default_timezone_set('Africa/Dar_es_Salaam');
 $current_page = 'barcode-station.php'; // keep the sidebar on Barcode Station
 include '../includes/db.php';

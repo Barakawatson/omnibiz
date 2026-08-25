@@ -8,7 +8,11 @@
 // Every change is written through the shared audit trail.
 // ============================================================
 require_once '../includes/auth.php';
-requireModule('inventory');
+// 'barcode', not 'inventory' - already granted to the same three roles
+// (admin, manager, storekeeper). api/products-scan.php already checks
+// userCan('pos') || userCan('barcode') for this exact page's scans; that
+// OR-branch was effectively dead until this page's own gate matched it.
+requireModule('barcode');
 // Reject any POST that does not carry this session's CSRF token.
 // Placed before every handler on this page, and a no-op on GET.
 csrfRequire();

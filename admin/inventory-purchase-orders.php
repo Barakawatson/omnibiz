@@ -1,6 +1,10 @@
 <?php
 require_once '../includes/auth.php';
-requireModule('inventory');
+// 'purchasing', not 'inventory' - it's already granted to exactly the
+// same three roles (admin, manager, storekeeper), but this is the key
+// that actually names what this page is for, and it's the one already
+// used for its sidebar link, dashboard widget and report group.
+requireModule('purchasing');
 // Reject any POST that does not carry this session's CSRF token.
 // Placed before every handler on this page, and a no-op on GET.
 csrfRequire();
