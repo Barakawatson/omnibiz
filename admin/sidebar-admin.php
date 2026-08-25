@@ -82,7 +82,8 @@ if (!defined('MX_UI_ASSETS_EMITTED')) {
     // itself server-side (see navSectionOpen). Keep in sync when adding
     // a page - a page missing here simply won't auto-expand its section.
     $secPages = [
-        'sales'      => ['pos.php','pos-sales.php','pos-receipt.php','retail-products.php','manage-customers.php','expiry-alerts.php'],
+        'sales'      => ['pos.php','pos-sales.php','pos-receipt.php','retail-products.php','manage-customers.php',
+                         'expiry-alerts.php','pos-terminals.php','pos-held-sales.php'],
         'inventory'  => ['inventory-dashboard.php','inventory-items.php','barcode-station.php',
                          'barcode-labels.php','inventory-requests.php','inventory-movements.php',
                          'inventory-purchase-orders.php','inventory-po-view.php','inventory-suppliers.php',
@@ -178,14 +179,35 @@ if (!defined('MX_UI_ASSETS_EMITTED')) {
                 <?php echo navLink('report.php?g=audit&r=cancelled_carts', 'fa-shield-halved', 'Cancelled carts', [],
                     navBadge('cancelled_carts_today', $navCounts['cancelled_carts_today'], 'danger')); ?>
             <?php endif; ?>
+            <?php
+            // Reference data - which tills exist - needed rarely, so kept
+            // below the daily work rather than mixed into it.
+            ?>
+            <?php if (userCan('terminals')): ?>
+                <?php echo navLink('pos-terminals.php', 'fa-cash-register', 'Tills / terminals', ['pos-terminals.php']); ?>
+            <?php endif; ?>
+            <?php if (userCan('held_sales_review')): ?>
+                <?php echo navLink('pos-held-sales.php', 'fa-pause', 'Held sales review', ['pos-held-sales.php']); ?>
+            <?php endif; ?>
         <?php echo navSectionClose(); ?>
         <?php endif; ?>
 
         <?php if (userCan('inventory') || userCan('stock_requests')): ?>
         <?php echo navSectionOpen('inventory', 'fa-boxes-stacked', 'Inventory', 'inventory', $navCounts['requests'] + $navCounts['low_stock'] + $navCounts['disposal'], $secPages['inventory']); ?>
+            <?php
+            // The section itself opens for stock_requests alone (a cashier
+            // needs the one link below) - but these six were rendering
+            // unconditionally for anyone who opened the section at all,
+            // because they predate that carve-out and were never wrapped
+            // in their own userCan('inventory') check the way barcode,
+            // disposal and purchasing already are. A cashier with only
+            // stock_requests should see nothing here but that one link.
+            ?>
+            <?php if (userCan('inventory')): ?>
             <?php echo navLink('inventory-dashboard.php', 'fa-chart-pie', 'Inventory overview', ['inventory-dashboard.php']); ?>
             <?php echo navLink('inventory-items.php', 'fa-box-open', 'Items & stock levels', ['inventory-items.php'], navBadge('low_stock', $navCounts['low_stock'], 'warn')); ?>
             <?php echo navLink('inventory-movements.php', 'fa-right-left', 'Stock movements', ['inventory-movements.php']); ?>
+            <?php endif; ?>
             <?php if (userCan('barcode')): ?>
                 <?php echo navLink('barcode-station.php', 'fa-barcode', 'Barcode station', ['barcode-station.php','barcode-labels.php']); ?>
             <?php endif; ?>
@@ -199,6 +221,7 @@ if (!defined('MX_UI_ASSETS_EMITTED')) {
                 <?php echo navLink('inventory-purchase-orders.php', 'fa-file-invoice-dollar', 'Purchase orders', ['inventory-purchase-orders.php','inventory-po-view.php'], navBadge('open_pos', $navCounts['open_pos'], 'info')); ?>
                 <?php echo navLink('inventory-suppliers.php', 'fa-truck-field', 'Suppliers', ['inventory-suppliers.php']); ?>
             <?php endif; ?>
+            <?php if (userCan('inventory')): ?>
             <?php echo navLink('inventory-reports.php', 'fa-chart-column', 'Inventory reports', ['inventory-reports.php']); ?>
             <?php
             // Reference data and configuration - needed rarely, so kept
@@ -206,6 +229,7 @@ if (!defined('MX_UI_ASSETS_EMITTED')) {
             ?>
             <?php echo navLink('inventory-categories.php', 'fa-folder-tree', 'Categories', ['inventory-categories.php']); ?>
             <?php echo navLink('inventory-units.php', 'fa-ruler', 'Units of measure', ['inventory-units.php']); ?>
+            <?php endif; ?>
             <?php if (userCan('settings')): ?>
                 <?php echo navLink('inventory-settings.php', 'fa-sliders', 'Inventory settings', ['inventory-settings.php']); ?>
             <?php endif; ?>
@@ -235,7 +259,7 @@ if (!defined('MX_UI_ASSETS_EMITTED')) {
         // from every module above it rather than being one of them.
         // The Reporting Centre gates each group internally, so it is
         // offered to anyone with at least one reportable module.
-        if (userCan('pos_sales') || userCan('inventory') || userCan('purchasing') || userCan('accounting')): ?>
+        if (userCan('sales_reports') || userCan('inventory') || userCan('purchasing') || userCan('accounting') || userCan('fraud_audit')): ?>
         <a href="reports.php" class="mx-link mx-link-top <?php echo in_array($current_page, ['reports.php','report.php'], true) ? 'active' : ''; ?>" data-tip="Reports">
             <i class="fas fa-chart-column mx-sec-home"></i>
             <span class="mx-link-text">Reports</span>

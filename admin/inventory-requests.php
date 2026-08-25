@@ -136,7 +136,11 @@ $statusMeta = [
 ];
 
 $pageTitle = 'Stock Requests';
-$breadcrumbs = [['Dashboard', 'index.php'], ['Inventory', 'inventory-dashboard.php'], ['Stock Requests']];
+// A cashier reaches this page via stock_requests alone and cannot open
+// inventory-dashboard.php (requireModule('inventory') would turn it
+// away) - the crumb is plain text for them, a link for anyone who can
+// actually follow it.
+$breadcrumbs = [['Dashboard', 'index.php'], userCan('inventory') ? ['Inventory', 'inventory-dashboard.php'] : ['Inventory'], ['Stock Requests']];
 include 'inventory-header.php';
 ?>
 <div class="inv-page-header">

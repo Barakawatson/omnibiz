@@ -45,8 +45,35 @@
 // both the live in-progress cart and a discarded held sale (the same
 // gap one step removed - posDeleteHeldSale() used to be a silent hard
 // delete with no trace at all).
+// v7: `cancelled_carts.held_since`. For a discarded HELD sale, the
+// moment that actually matters to a manager reviewing the audit report
+// is when the sale was first parked, not when it was later discarded -
+// two sales cancelled back-to-back look identical otherwise, even
+// though one sat held for a day and the other for a minute. Captured
+// from pos_held_sales.created_at at cancellation time, since nothing
+// else remembers it once that row is deleted.
+// v8: session-locking columns on `pos_terminals` (locked_by_user_id,
+// locked_by_username, locked_at, last_activity_at) so only one cashier
+// can hold a given till at a time. Deliberately separate from
+// `is_active`, which already means "enabled/deactivated" - a lock is a
+// live session, not a configuration toggle. `terminal_lock_timeout_minutes`
+// (in inv_settings) is how stale a lock has to get before another
+// cashier's claim can take it over - one setting, read everywhere a
+// staleness check happens, never a literal repeated in code.
+// v9: `pos_held_sales` gets a real lifecycle instead of "row exists =
+// held, row gone = anything else". `status` (held/stale/expired/
+// orphaned/resumed/completed/cancelled) means a held sale is never
+// hard-deleted again - every terminal state is an UPDATE, so the
+// history survives. `resulting_txn_id` links a completed held sale
+// forward to the sale it became (and back again, if that sale is later
+// voided). `resumed_at`/`orphaned_at` and the three `recovered_*`
+// columns are the timestamps a manager reviewing a stuck cart actually
+// needs on the row itself, without joining inv_audit_log for them.
+// `held_sale_stale_minutes` / `held_sale_expiry_minutes` (in
+// inv_settings) are the two configurable thresholds, same pattern as
+// `terminal_lock_timeout_minutes`.
 if (!defined('POS_SCHEMA_VERSION')) {
-    define('POS_SCHEMA_VERSION', '6');
+    define('POS_SCHEMA_VERSION', '9');
 }
 
 /** Payment methods a sale can be settled with, and where each lands. */
@@ -234,6 +261,7 @@ function ensurePosSchema(mysqli $conn): void {
         `terminal_id` INT(11) DEFAULT NULL,
         `source` ENUM('live_cart','held_sale') NOT NULL DEFAULT 'live_cart',
         `held_sale_id` INT(11) DEFAULT NULL,
+        `held_since` DATETIME DEFAULT NULL,
         `reason_code` VARCHAR(40) NOT NULL,
         `reason_detail` VARCHAR(255) DEFAULT NULL,
         `itemized_cart_json` MEDIUMTEXT NOT NULL,
@@ -309,6 +337,33 @@ function ensurePosSchema(mysqli $conn): void {
         $col->free();
     }
 
+    // --- v6 -> v7: when a discarded held sale was first held --------------
+    posAddColumn($conn, 'cancelled_carts', 'held_since', "ADD COLUMN `held_since` DATETIME DEFAULT NULL AFTER `held_sale_id`");
+
+    // --- v7 -> v8: session-locking columns -------------------------------
+    // Nullable and additive - a terminal with no lock is simply free, the
+    // same as every terminal was before this version existed.
+    posAddColumn($conn, 'pos_terminals', 'locked_by_user_id',
+        "ADD COLUMN `locked_by_user_id` INT(11) DEFAULT NULL AFTER `is_active`,
+         ADD KEY `idx_pos_terminal_locked_by` (`locked_by_user_id`)");
+    posAddColumn($conn, 'pos_terminals', 'locked_by_username', "ADD COLUMN `locked_by_username` VARCHAR(100) DEFAULT NULL AFTER `locked_by_user_id`");
+    posAddColumn($conn, 'pos_terminals', 'locked_at', "ADD COLUMN `locked_at` DATETIME DEFAULT NULL AFTER `locked_by_username`");
+    posAddColumn($conn, 'pos_terminals', 'last_activity_at', "ADD COLUMN `last_activity_at` DATETIME DEFAULT NULL AFTER `locked_at`");
+
+    // --- v8 -> v9: pos_held_sales lifecycle --------------------------------
+    // `status` DEFAULT 'held' means every row that already exists at
+    // upgrade time is correctly read as still-held (which is exactly what
+    // it was under the old "row exists = held" rule) - no backfill needed.
+    posAddColumn($conn, 'pos_held_sales', 'status',
+        "ADD COLUMN `status` VARCHAR(20) NOT NULL DEFAULT 'held' AFTER `cashier_name`,
+         ADD KEY `idx_held_status` (`status`)");
+    posAddColumn($conn, 'pos_held_sales', 'resumed_at', "ADD COLUMN `resumed_at` DATETIME DEFAULT NULL AFTER `status`");
+    posAddColumn($conn, 'pos_held_sales', 'orphaned_at', "ADD COLUMN `orphaned_at` DATETIME DEFAULT NULL AFTER `resumed_at`");
+    posAddColumn($conn, 'pos_held_sales', 'resulting_txn_id', "ADD COLUMN `resulting_txn_id` INT(11) DEFAULT NULL AFTER `orphaned_at`");
+    posAddColumn($conn, 'pos_held_sales', 'recovered_by', "ADD COLUMN `recovered_by` INT(11) DEFAULT NULL AFTER `resulting_txn_id`");
+    posAddColumn($conn, 'pos_held_sales', 'recovery_reason', "ADD COLUMN `recovery_reason` VARCHAR(255) DEFAULT NULL AFTER `recovered_by`");
+    posAddColumn($conn, 'pos_held_sales', 'recovered_at', "ADD COLUMN `recovered_at` DATETIME DEFAULT NULL AFTER `recovery_reason`");
+
     // --- Seed one till ---------------------------------------------------
     // A single neutral till, so a fresh install can ring up a sale before
     // anything is configured. It is deliberately NOT named after a trade -
@@ -342,6 +397,9 @@ function ensurePosSchema(mysqli $conn): void {
         ['pos_tax_rate', '0'],            // percent; 0 = no tax (current pricing)
         ['pos_tax_inclusive', '0'],       // 1 = prices already include tax
         ['pos_receipt_footer', 'Thank you for shopping with us!'],
+        ['terminal_lock_timeout_minutes', '20'], // no heartbeat for longer than this = stale, reclaimable
+        ['held_sale_stale_minutes', '30'],  // still in the active queue, but flagged as ageing
+        ['held_sale_expiry_minutes', '120'], // removed from the active queue; manager recovery only from here
         ['pos_schema_version', (string)POS_SCHEMA_VERSION],
     ];
     $stmt = $conn->prepare("INSERT INTO inv_settings (setting_key, setting_value) VALUES (?, ?)

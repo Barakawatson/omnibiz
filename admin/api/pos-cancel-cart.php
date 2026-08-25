@@ -3,10 +3,10 @@
 // POST /admin/api/pos-cancel-cart.php
 //   Records a cart that never became a sale - either the live,
 //   in-progress cart being cleared, or a parked held sale being
-//   discarded - with a mandatory reason. This is the ONLY path that
-//   deletes a held sale without completing it: the audit row is
-//   written first, inside the same transaction, so a held sale can
-//   never disappear unaudited (see posLogCancelledCart()).
+//   discarded - with a mandatory reason. For a held sale, the row is
+//   marked 'cancelled' (never deleted) inside the same transaction as
+//   the audit insert, after an ownership check against this session's
+//   own cashier/terminal (see posLogCancelledCart()).
 //
 // Body (JSON):
 //   source        - 'live_cart' | 'held_sale'
@@ -44,7 +44,11 @@ $heldSaleId = (int)($body['held_sale_id'] ?? 0);
 $reasonCode = trim((string)($body['reason_code'] ?? ''));
 $reasonDetail = trim((string)($body['reason_detail'] ?? ''));
 $total = (float)($body['total'] ?? 0);
-$terminalId = (int)($body['terminal_id'] ?? $_SESSION['pos_terminal_id'] ?? 0);
+// Session-derived only - not $body['terminal_id']. posLogCancelledCart()
+// uses this value for the held-sale ownership check, so it must be the
+// terminal this session's own lock actually claimed, never a
+// client-supplied one.
+$terminalId = (int)($_SESSION['pos_terminal_id'] ?? 0);
 
 $items = $body['items'] ?? [];
 if (is_string($items)) { $items = json_decode($items, true) ?: []; }
