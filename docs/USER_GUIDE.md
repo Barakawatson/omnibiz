@@ -33,6 +33,8 @@
 12B. [Choosing light or dark](#12b-choosing-light-or-dark)
 12C. [POS full screen and the customer display](#12c-pos-full-screen-and-the-customer-display)
 12D. [Reports](#12d-reports)
+12E. [Tills / Terminals](#12e-tills--terminals)
+12F. [Held Sales Review](#12f-held-sales-review)
 13. [Notifications and alerts](#13-notifications-and-alerts)
 14. [Common problems](#14-common-problems)
 
@@ -1291,6 +1293,65 @@ You will see *"This report could not be produced. The problem has been logged."*
 Every report works on a phone. The menu slides in from the **☰** button, the filters fold away behind **Filters** (tap it to open them), and wide tables scroll sideways with your finger while the rest of the page stays still.
 
 Print, PDF and CSV all behave the same on a phone as on the desktop — the file contains the whole report, not the part that happened to fit on the screen.
+
+---
+
+## 12E. Tills / Terminals
+
+*New 25 August 2026. Administrator and Manager only — sidebar, under Point of Sale.*
+
+![Tills / Terminals](screenshots/12-tills-terminals.jpg)
+
+This screen manages the physical registers a sale can be rung up on, and — since the terminal-locking change on the same date — shows who is actually on each one right now.
+
+### Adding or editing a till
+
+Click **Add till**, or the pencil on an existing row. A till needs a **name**, a unique **code** (shown on receipts), and a **department** — the stock it opens on by default. Untick **Active** to stop it appearing as a choice for cashiers without losing its sales history.
+
+### Reading the Status column
+
+- **Active** / **Inactive** — whether the till itself is enabled, independent of whether anyone is using it.
+- **In session** (blue) — a cashier is actively logged into this till right now. The name, when they started, and their last activity time are shown underneath (in the screenshot, *test*, started 12:36, last active 13:52).
+- **Stale lock** (amber) — someone was on this till but it's gone quiet past the timeout (network drop, browser crash) without them logging out properly.
+
+### Force-releasing a till
+
+If a till shows **In session** or **Stale lock** but genuinely needs freeing up — the cashier's shift ended without them logging out, or the browser crashed — click the unlock icon and confirm. This immediately signs that cashier out of the till so someone else can use it. Their sale, if one was in progress, is not affected; any sales they had **held** are always safe regardless (see [Held Sales Review](#12f-held-sales-review) below).
+
+You cannot delete a till with sales history — it is deactivated instead, so old receipts still show its name correctly.
+
+---
+
+## 12F. Held Sales Review
+
+*New 25 August 2026. Administrator and Manager only — sidebar, under Point of Sale.*
+
+![Held Sales Review](screenshots/13-held-sales-review.jpg)
+
+Every parked ("held") sale across every till, in one place — a cashier only ever sees their own on their own till, so this is the one screen that shows the whole picture.
+
+### Needs attention
+
+Sales that no longer belong to anyone actively working on them:
+
+- **Orphaned** — a cashier logged out while it was still held.
+- **Expired** — nobody touched it for a long time (about 2 hours by default).
+
+Each row shows the original cashier, till, department, amount, and how long it's been sitting — never deleted, so nothing here is ever silently lost.
+
+### Recovering a held sale
+
+Click **Recover**. Before you do anything, the dialog shows the **full workflow** for that sale — every event from when it was first held through to now (created, logged out, orphaned, marked ageing, expired, and so on) — so you know exactly what happened before deciding what to do.
+
+Choose **which till to give it to** — only tills with a cashier **actively logged in right now** are offered, so it always lands on someone who can actually pick it up immediately — enter a **reason**, and confirm. The sale reappears in that cashier's held-sales list as if it had never been interrupted; who authorized the recovery and why is recorded permanently on the sale.
+
+### Viewing history without recovering
+
+The clock icon next to any row (in either table) opens its full workflow history read-only — useful for completed or cancelled sales, or just to understand what happened to one before deciding whether it needs your attention at all.
+
+### All held sales (reference)
+
+Every held sale ever recorded, whatever its current status — held, resumed, completed, cancelled, orphaned, expired. If one became a real sale, its receipt number links straight to it.
 
 ---
 
