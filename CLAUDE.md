@@ -136,6 +136,29 @@ Verified 13 August 2026: all 23 reports plus 10 other admin pages at 390px, and 
 
 `admin/pos.php` now also carries a **full-screen** control (real Fullscreen API, synced from `fullscreenchange` so Esc keeps the label right) and a **customer display** (second screen, `BroadcastChannel('pos_sales_bus')`, same page loaded with `#customer`). Both are additive: they do not touch the cart, checkout, receipt, barcode listener, `SCAN_MAX_GAP_MS` or F2. The display listens only and never posts back, so it cannot affect a sale.
 
+### Terminal session-locking (25 August 2026)
+
+`pos_terminals` (schema v8) gained `locked_by_user_id` / `locked_by_username` / `locked_at` / `last_activity_at` — one cashier per till at a time, enforced **server-side**, not just by hiding the picker. Deliberately separate from `is_active` (enabled/deactivated is a configuration toggle; a lock is a live session).
+
+- `posClaimTerminal()` (`includes/pos_functions.php`) does `SELECT ... FOR UPDATE` then check-then-write inside one transaction — the same lock-check-write shape as `disposeFromBatch()` / `recordStockMovement()`. Two simultaneous claims on the same till cannot both win (verified with a real two-process race, not just a unit test).
+- `posTerminalLockState($terminal, $timeoutMinutes)` is the **one** place free/active/stale is decided from a row; every reader (the till picker, the header, `admin/pos-terminals.php`) calls it so they can never disagree. Timeout is `terminal_lock_timeout_minutes` in `inv_settings` (default 20) — read via `getInvSetting()`, never a literal.
+- **No live switching.** `admin/pos.php`'s `select_terminal` POST handler rejects a claim attempt outright if the session already holds a *different* active lock — the only way to move to another till is to log out (which releases the lock) and log back in. This is checked server-side in the handler itself, not just by removing the header's picker UI.
+- `admin/pos.php` blocks behind a static-backdrop "Select a Till" modal until a lock is actually held fresh on every load — there is no more auto-fallback to "the first active till" (that could hand a cashier a till someone else is mid-sale on). A 45s heartbeat (`admin/api/pos-terminal-heartbeat.php`) keeps `last_activity_at` current while the till is open; a failed heartbeat re-shows the modal.
+- `logout.php` releases the lock (`posReleaseTerminal()`); `admin/pos-terminals.php` shows a Session status row (free/active/stale) and a **Force Release** action for admin/manager (`posForceReleaseTerminal()` — no extra role check inside the function itself; the page's own `requireModule('terminals')` is the gate, same pattern as `purchasing_approve`).
+- While wiring the sidebar links for this, found and fixed a real bug: six Inventory links (`inventory-dashboard.php`, `inventory-items.php`, `inventory-movements.php`, `inventory-reports.php`, `inventory-categories.php`, `inventory-units.php`) were rendering for **any** role that opened the Inventory section — because that section opens for `stock_requests` alone (so a cashier can reach Stock Requests), and those six links predated that carve-out and were never wrapped in their own `userCan('inventory')` check the way their siblings (barcode, disposal, purchasing) already were. The underlying pages were already `requireModule('inventory')`-gated server-side, so this was a visibility bug, not an access hole — fixed in `admin/sidebar-admin.php` regardless, plus a stray breadcrumb link to `inventory-dashboard.php` on `admin/inventory-requests.php` that a cashier couldn't actually open.
+
+### Held-sale ownership, isolation and lifecycle (25 August 2026)
+
+Held sales used to be a bare `pos_held_sales` row with no ownership check anywhere: the list was unfiltered (every cashier's parked cart contents were embedded in every other cashier's page HTML), resume was 100% client-side (`prompt()`-adjacent `JSON.parse()` of data already in the DOM), and both checkout and cancel-cart deleted a client-supplied `held_sale_id` with no check that it belonged to the caller. All of that is closed now:
+
+- `pos_held_sales` (schema v9) gained a `status` column — `held → {stale → expired}`, `held/stale → resumed → completed`, `held/stale → cancelled`, `held/stale/resumed → orphaned`. **A held sale is never hard-deleted again**; every terminal state is an `UPDATE`, so `posDeleteHeldSale()` no longer exists. "Voided" is **not** a stored status — when a sale that came from a held sale is later voided, `posVoidSale()` cross-references it and logs `held_sale_voided` against the original row, whose `status` correctly stays `completed` (that fact doesn't become false just because the sale was later reversed).
+- `posGetHeldSalesForCashier($conn, $cashierId, $terminalId)` is the only reader `admin/pos.php` uses now — scoped to `cashier_id` AND `terminal_id` AND `status IN ('held','stale')`, so another cashier's cart never reaches the browser at all.
+- `posResumeHeldSale()` / `posCompleteHeldSale()` are the ownership + concurrency gate, same `FOR UPDATE` shape as the terminal claim, keyed to the **session's own** cashier/terminal — never a client-supplied one. New endpoint `admin/api/pos-resume-held.php`; `admin/api/pos-checkout.php` and `pos-cancel-cart.php` were hardened the same way (session-derived `terminal_id`, not `$body['terminal_id']`).
+- Stale/expiry thresholds are lazy-swept on read (`posSweepHeldSales()`, mirroring the batch-expiry lazy-recompute idiom already used elsewhere) — `held_sale_stale_minutes` / `held_sale_expiry_minutes` in `inv_settings` (defaults 30 / 120).
+- **Logout orphans, never deletes, never auto-transfers.** `posOrphanHeldSalesForCashier()` flips a cashier's own `held`/`stale`/`resumed` rows to `orphaned` at logout. A *different* cashier claiming that same till next does **not** inherit them. The **same** cashier's own next login automatically reclaims their own orphaned sales back to `held` (`posReclaimOwnOrphanedHeldSales()`, called from `admin/pos.php`'s claim handler) — a different cashier claiming the till in between never triggers this.
+- `admin/pos-held-sales.php` (module key `held_sales_review`, admin/manager) reviews every held sale across every till and recovers an orphaned/expired one to a **currently-active** cashier — read from that terminal's own live lock (`posGetTerminal()` + `posTerminalLockState()`), never a separately typed account. Every held-sale event (created/resumed/completed/cashier-logout/orphaned/reclaimed/stale/expired/cancelled/voided/manager-recovery) is written to the shared `inv_audit_log` and surfaced as a workflow timeline (`admin/api/pos-held-sale-history.php`) shown both inline in the Recover modal and via a standalone History button — built with `createElement`/`textContent`, never `innerHTML`, since the trail contains free text people typed.
+- The "Hold Sale" label prompt is a proper in-page modal now (`#holdLabelModal` in `admin/pos.php`), not a native `prompt()` — the native dialog froze the tab for any kind of scripted interaction and was a bare OS popup for users.
+
 ## Reporting
 
 `admin/reports.php` is the Reporting Centre; `admin/report.php` renders all 23 reports from one switch. Adding a report means adding an entry to `reportCatalogue()` in `includes/report_functions.php` and a `case` in that switch - not a new page.
@@ -205,10 +228,11 @@ The daily close keeps its original `supermarket_sales` / `stationery_sales` / `g
 includes/          db.php, auth.php, session.php, csrf.php, core_schema.php, remember_me.php,
                    shop_settings.php, business_types.php, uploads.php, report_functions.php,
                    pdf_writer.php, *_schema.php, *_functions.php, stock_ledger.php
-admin/             all staff-facing pages (38 files); sidebar-admin.php + sidebar-nav.php +
+admin/             all staff-facing pages (43 files); sidebar-admin.php + sidebar-nav.php +
                    inventory-header/footer.php are shared chrome
 admin/partials/    page-header.php, empty-state.php, pagination.php, setup-required.php
-admin/api/         JSON endpoints (POS scanning/checkout/stock-in)
+admin/api/         JSON endpoints (POS scanning/checkout/stock-in/cancel/resume-held/
+                   terminal-heartbeat/held-sale-history, customer lookup)
 assets/css/admin/  styles.css (36-line legacy remnant) then ui.css (design system) - order matters
 assets/js/admin/   ui.js exposes window.MX (toasts, filters, sidebar, modals, live alerts)
 assets/uploads/    the only directory the app writes to - shop_products/,
@@ -222,26 +246,27 @@ docs/              USER_GUIDE / TECHNICAL_DOCUMENTATION / SYSTEM_OPERATIONS_HOW_
 
 ## Roles & access
 
-Four roles, defined by `roleModules()` in `includes/auth.php`:
+Five roles, defined by `roleModules()` in `includes/auth.php`:
 
 | Role | Lands on | Can do |
 |---|---|---|
 | `admin` | `/admin/dashboard` | Everything, including the chart of accounts, manual journal entries, departments and setup |
-| `manager` | `/manager/overview` | Everything operational plus reports, voids, users — but not the chart of accounts, journal entries or departments |
-| `storekeeper` | `/inventory` | Stock intake, purchase orders, reorder alerts, barcodes, products — but **cannot approve a purchase order or pay a supplier** |
-| `cashier` | `/pos/terminal` | POS checkout, receipts, customers |
+| `manager` | `/manager/overview` | Everything operational plus reports, voids, users, terminals and held-sale recovery — but not the chart of accounts, journal entries or departments |
+| `accountant` | `admin/accounting-dashboard.php` | The books, full stop — chart of accounts, journal, expenses, P&L, daily close history — plus read-only `sales_reports` to reconcile revenue. No POS, inventory or terminal access, and no `pos_sales` (they read sales through the report group, not the till's own transaction list) |
+| `storekeeper` | `/inventory` | Stock intake, purchase orders, reorder alerts, barcodes, products, stock requests — but **cannot approve a purchase order or pay a supplier** |
+| `cashier` | `/pos/terminal` | POS checkout, own-till receipts, customer lookup, stock requests, expiry alerts — nothing else |
 
-Guard every admin page with `requireModule('key')` (preferred) or `requireRole([...])` as its first statement after including `auth.php`. The sidebar renders only modules the role may use via `userCan()`, and `roleHome()` / `roleHomeUrl()` decide where each role lands at login. When adding a page, add its role guard *and* its sidebar entry together.
+Guard every admin page with `requireModule('key')` (preferred) or `requireRole([...])` as its first statement after including `auth.php`. The sidebar renders only modules the role may use via `userCan()`, and `roleHome()` / `roleHomeUrl()` decide where each role lands at login. When adding a page, add its role guard *and* its sidebar entry together — and check every link/button on it individually: a section-level `userCan()` check that gates the whole sidebar group is not enough, since a link inside that group with no check of its own renders for anyone who can open the group at all (the exact bug fixed on 25 August 2026 in `admin/sidebar-admin.php` - see "POS additions" below).
 
 `authIsApiRequest()` makes the guards return **401/403 JSON** for anything under `admin/api/` instead of redirecting to an HTML login form one directory up.
 
-Two module keys are granted but never checked: `reports` (Inventory Reports gates on `inventory` instead, which is why storekeepers can open it) and `pos_void` (voiding tests the role name directly). Don't assume a key is enforced just because it's in the list — grep for it.
+The dead `reports` key (granted but never checked — Inventory Reports has always actually gated on `inventory`) was removed entirely on 25 August 2026; there is no bare `reports` key left to find in `roleModules()`. `pos_void` **is** enforced (`admin/pos-sales.php` reads `userCan('pos_void')`, not the role name, as of the same date) and `held_sales_review` (admin + manager, `admin/pos-held-sales.php`) is new. Don't assume a key is enforced just because it's in the list — grep for it.
 
 **`purchasing_approve` (admin + manager only) IS enforced**, in `admin/inventory-po-view.php`. Spending decisions are separated from stock work: a storekeeper raises the order, uploads the invoice and books the goods in, but **approving an order, cancelling one that is already approved, and recording a payment to a supplier** all require the key. It is checked server-side before any handler runs, and a refusal is written to the audit log as `denied_<action>` — hiding the buttons is a courtesy, not the control. `poRecordPayment()` has exactly one call site, so that gate covers every path by which money reaches a supplier.
 
 The clean role URLs above **redirect** (`R=302`) to the real `admin/*.php` files. `mod_rewrite` is required; without `.htaccess` every clean URL 404s.
 
-**They must never go back to being internal rewrites.** A rewrite leaves the browser's address at `/Home/inventory` while `admin/inventory-dashboard.php` answers, so every relative link on the page resolves against `/Home/` - the sidebar's `inventory-items.php` becomes `/Home/inventory-items.php`, which 404s. That broke the whole of navigation for any role landing on a clean URL, and trapped cashiers in the till: Exit POS, the receipt window and even the 404 page's own "Back to Home" all 404ed (13 August 2026; the three failures are in the Apache access log). Redirecting keeps the real path in the address bar, so all 38 admin pages' relative links, form actions and asset URLs resolve without touching a single href.
+**They must never go back to being internal rewrites.** A rewrite leaves the browser's address at `/Home/inventory` while `admin/inventory-dashboard.php` answers, so every relative link on the page resolves against `/Home/` - the sidebar's `inventory-items.php` becomes `/Home/inventory-items.php`, which 404s. That broke the whole of navigation for any role landing on a clean URL, and trapped cashiers in the till: Exit POS, the receipt window and even the 404 page's own "Back to Home" all 404ed (13 August 2026; the three failures are in the Apache access log). Redirecting keeps the real path in the address bar, so all 43 admin pages' relative links, form actions and asset URLs resolve without touching a single href.
 
 The redirect targets are prefixed with `%{ENV:BASE}`, computed by the standard Apache idiom at the top of the rules, so the app still works from a subdirectory or from the document root.
 

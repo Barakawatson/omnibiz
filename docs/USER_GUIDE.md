@@ -149,7 +149,9 @@ Click **Profile** in the *Account* section of the sidebar. See [section 12](#12-
 
 ## 3. Understanding user roles
 
-The system has exactly **four roles**. There is no facility to create new roles or to edit which modules a role can reach — the four roles and their permissions are fixed in the program.
+*(Updated 25 August 2026 — a fifth role, Accountant, was added, and several permissions were split or newly enforced. See the notes under the matrix for exactly what changed.)*
+
+The system has exactly **five roles**. There is no facility to create new roles or to edit which modules a role can reach — the five roles and their permissions are fixed in the program.
 
 ### Administrator (`admin`)
 
@@ -172,45 +174,58 @@ Everything operational, plus reports and overrides. A manager can do everything 
 - Post or reverse journal entries
 - Open the Departments screen
 
-A manager **can** void sales, manage users, approve stock requests, and see all accounting reports.
+A manager **can** void sales, manage users, approve stock requests, manage tills/terminals (including force-releasing a stuck one), review and recover held sales, and see all accounting reports.
+
+### Accountant (`accountant`)
+
+*New 25 August 2026.* The books, full stop — Chart of Accounts, General Ledger, Expenses, Profit & Loss, the daily close history, plus **read-only** Sales Reports to reconcile revenue against what was posted. An accountant **cannot** open the POS Terminal, see or touch inventory, approve or pay a purchase order, manage tills, or manage users — and does not see the operational (own-till) sales list a cashier uses, since that's a different screen from the Sales Reports group.
 
 ### Storekeeper (`storekeeper`)
 
-Stock and purchasing only. A storekeeper can reach Products, Inventory, Purchasing, the Barcode Station and Stock Requests. A storekeeper **cannot** open the till, see sales, see customers, see any accounting, or manage users.
+Stock and purchasing only. A storekeeper can reach Products, Inventory, Purchasing, the Barcode Station, Stock Requests, Expiring Soon, and can see (but not pay) Supplier Liabilities. A storekeeper **cannot** open the till, see sales, see customers, see any accounting, approve a purchase order or pay a supplier, or manage users.
 
 ### Cashier (`cashier`)
 
-The till and nothing else. A cashier can use the POS Terminal, see the sales and receipts list, and look up customers. A cashier **cannot** see inventory, products, purchasing, accounting, reports or user management — and cannot void a sale.
+The till and nothing else. A cashier can use the POS Terminal, see their **own** sales and receipts, raise a Stock Request, and see Expiring Soon. A cashier **cannot** see inventory, products, purchasing, accounting, reports, tills/terminals management, another cashier's held sales, or user management — and cannot void a sale. *(25 August 2026: a cashier no longer has a separate Customer Management screen — the till's own phone lookup at checkout still works — and is locked to one till per login; switching tills requires logging out and back in.)*
 
 ### Role / permission matrix
 
 A tick means the role has that permission. These come directly from `roleModules()` in the program.
 
-| Permission (module) | What it controls | Admin | Manager | Storekeeper | Cashier |
-|---|---|:--:|:--:|:--:|:--:|
-| `dashboard` | Main Dashboard | ✔ | ✔ | — | — |
-| `manager_overview` | Manager Overview screen | ✔ | ✔ | — | — |
-| `pos` | POS Terminal | ✔ | ✔ | — | ✔ |
-| `pos_sales` | Sales & Receipts list, receipt reprint | ✔ | ✔ | — | ✔ |
-| `pos_void` | (permission exists; voiding is checked by role — see note) | ✔ | ✔ | — | — |
-| `products` | Products & Prices | ✔ | ✔ | ✔ | — |
-| `inventory` | Inventory: items, movements, categories, units, reports, barcode API | ✔ | ✔ | ✔ | — |
-| `purchasing` | Purchase orders and suppliers | ✔ | ✔ | ✔ | — |
-| `barcode` | Barcode Station and label printing | ✔ | ✔ | ✔ | — |
-| `stock_requests` | Stock requests | ✔ | ✔ | ✔ | — |
-| `customers` | Customer management | ✔ | ✔ | — | ✔ |
-| `accounting` | Accounting overview, ledger, expenses, P&L, Z-report | ✔ | ✔ | — | — |
-| `accounting_manage` | Chart of accounts, manual journal entries, reversals | ✔ | — | — | — |
-| `reports` | (permission exists; see note) | ✔ | ✔ | — | — |
-| `users` | Manage Users | ✔ | ✔ | — | — |
-| `settings` | Inventory Settings | ✔ | ✔ | — | — |
-| `departments` | Enable/disable departments | ✔ | — | — | — |
+| Permission (module) | What it controls | Admin | Manager | Accountant | Storekeeper | Cashier |
+|---|---|:--:|:--:|:--:|:--:|:--:|
+| `dashboard` | Main Dashboard | ✔ | ✔ | ✔ | — | — |
+| `manager_overview` | Manager Overview screen | ✔ | ✔ | — | — | — |
+| `pos` | POS Terminal | ✔ | ✔ | — | — | ✔ |
+| `pos_sales` | Own-till Sales & Receipts list, receipt reprint | ✔ | ✔ | — | — | ✔ |
+| `pos_void` | Void a sale | ✔ | ✔ | — | — | — |
+| `products` | Products & Prices | ✔ | ✔ | — | ✔ | — |
+| `inventory` | Inventory: items, movements, categories, units, reports, disposal | ✔ | ✔ | — | ✔ | — |
+| `purchasing` | Raise purchase orders, receive goods | ✔ | ✔ | — | ✔ | — |
+| `purchasing_approve` | Approve/cancel a PO, pay a supplier | ✔ | ✔ | — | — | — |
+| `barcode` | Barcode Station and label printing | ✔ | ✔ | — | ✔ | — |
+| `stock_requests` | Raise/approve stock requests | ✔ | ✔ | — | ✔ | ✔ |
+| `customers` | Customer management screen | ✔ | ✔ | — | — | — |
+| `accounting` | Accounting overview, ledger, expenses, P&L, Z-report | ✔ | ✔ | ✔ | — | — |
+| `accounting_manage` | Chart of accounts, manual journal entries, reversals | ✔ | — | ✔ | — | — |
+| `sales_reports` | Shop-wide Sales report group (summary/by-cashier/by-terminal) | ✔ | ✔ | ✔ | — | — |
+| `users` | Manage Users | ✔ | ✔ | — | — | — |
+| `settings` | Inventory Settings | ✔ | ✔ | — | — | — |
+| `departments` | Enable/disable departments | ✔ | — | — | — | — |
+| `shop_settings` | Shop identity, receipt, payment methods | ✔ | — | — | — | — |
+| `disposal_approve` | Approve a stock disposal/write-off | ✔ | ✔ | — | — | — |
+| `expiry_alerts` | Expiring Soon screen | ✔ | ✔ | — | ✔ | ✔ |
+| `supplier_liabilities` | Supplier balances (storekeeper: read-only, enforced by the page) | ✔ | ✔ | — | ✔ | — |
+| `fraud_audit` | Cancelled Carts report | ✔ | ✔ | — | — | — |
+| `terminals` | Tills / Terminals management, Force Release | ✔ | ✔ | — | — | — |
+| `held_sales_review` | Held Sales Review — recover an orphaned/expired held sale | ✔ | ✔ | — | — | — |
 
-**Notes on this table (verified from source code):**
+**Notes on this table (verified from source code, 25 August 2026):**
 
-- **`pos_void`** is granted to admin and manager, but the Sales & Receipts screen actually checks the role name directly (`admin` or `manager`) rather than this permission. The outcome is the same, but the permission itself is not what is tested.
-- **`reports`** is granted to admin and manager but is not checked by any page. Inventory Reports is gated by `inventory` instead, which is why a storekeeper can open it.
+- **`pos_void`** is now genuinely checked (`userCan('pos_void')`) on the Sales & Receipts screen — it used to test the role name directly instead, which had the same practical effect but meant the permission listed here wasn't actually what was tested. That drift is fixed.
+- The old **`reports`** permission (granted to admin/manager but checked nowhere — Inventory Reports has always actually gated on `inventory`) was **removed from the system entirely** on 25 August 2026, rather than left as dead weight.
 - **Inventory Settings** and **Manage Users** check the role names `admin` and `manager` directly rather than the `settings` / `users` permissions.
+- A cashier viewing a receipt must be that sale's own cashier (or an admin/manager) — enforced on the page itself, not by a separate permission.
 - Pages that everyone signed in can reach: **Dashboard entry point** (`admin/index.php` — it redirects roles without dashboard access to their own home screen), **Profile**, and **Access denied**.
 
 ---
@@ -274,9 +289,13 @@ There is nothing to start. The till is always ready — scan or tap the first pr
 
 ### Selecting a terminal
 
-The current terminal is named in the top bar (in the screenshot, **Supermarket Counter (SM-01)**). Click it to pick a different one.
+*(Behaviour changed 25 August 2026 — a terminal is now a real, single-holder lock, not just a remembered preference.)*
 
-Your choice is remembered for the rest of your session, so a till at the stationery counter stays on stationery without being re-picked every sale. If you have never chosen one, the system picks the first active terminal for you rather than blocking you.
+Right after logging in, if you don't already hold a till, you're shown **Select a Till** — a list of every till, each marked **Available**, **In use by &lt;name&gt;**, or **Stale — reclaimable** (someone was on it but stopped responding). Pick an available one. You cannot proceed to the checkout screen until you do — there is no more automatic fallback to "the first active till."
+
+The till you pick is named in the top bar (in the screenshot, **Supermarket Counter (SM-01)**) for the rest of this login, but it is **no longer clickable** — there is nothing to switch to from here. **To use a different till, log out and log back in** and pick the other one from the same list. This is deliberate: one cashier can never be on two tills at once, and a till you're actively using cannot be taken by someone else while you're on it.
+
+If your session goes quiet for too long (network drop, laptop asleep) your lock can go stale and you may be asked to pick a till again — your cart-in-progress is not affected, and any sales you'd already held are safe regardless (see "Resuming a held sale" below).
 
 A till belongs to a department, and opens showing that department's stock — a till set to Supermarket opens on supermarket stock, one set to Plumbing opens on plumbing stock. A till set to **General**, or to no department at all, opens showing **everything**. You can switch department by tab at any time, and **All Departments** is always the first tab.
 
@@ -392,15 +411,21 @@ To reprint an old receipt, go to **Sales & Receipts** in the sidebar and use the
 
 ### Holding a sale
 
-Click **Hold Sale**. You are asked for a label (it suggests *"Held HH:MM"* — a customer's name is more useful). The cart is saved on the server, so **any till can resume it**, and your cart clears for the next customer.
+Click **Hold Sale**. A dialog on the page (not a browser pop-up, since 25 August 2026) asks for a label — it suggests *"Held HH:MM"*, but a customer's name is more useful. The cart is saved on the server and your cart clears for the next customer.
+
+*(Behaviour changed 25 August 2026.)* A held sale belongs to **you, on the till you held it on** — no other cashier can see it, resume it, or discard it, even on a different till. It is never lost: if you log out before finishing it, it waits for you rather than disappearing or being deleted (see "What happens if I log out with a sale still held?" below).
 
 *"Nothing to hold."* means the cart is empty.
 
 ### Resuming a held sale
 
-Open the held-sales list from the till, find the sale by its label, and choose to resume it. The cart is restored and you get *"Held sale resumed."* When you complete that sale, the held copy is deleted automatically.
+Open the held-sales list from the till — it only ever shows **your own** held sales on **this** till. Find the sale by its label and choose **Resume**. The cart is restored and you get *"Held sale resumed."* When you complete that sale, the held record is marked completed — it is **not deleted**; a manager can still see it in the shop's history.
 
-You can also discard a held sale without selling it.
+You can also discard a held sale without selling it — you'll be asked for a reason, same as clearing an in-progress cart.
+
+### What happens if I log out with a sale still held?
+
+*(New 25 August 2026.)* Nothing is lost and nothing is deleted. If you log back in yourself — even on a different day — and pick a till, that sale comes back to your held-sales list automatically. **No one else can pick it up in the meantime**, even if they use the same till while you're away. If you genuinely need someone else to finish it (you're off for the day, for example), ask a manager or administrator — they can review it and hand it to whoever is actively on shift, on the **Held Sales Review** screen.
 
 ### Handling an invalid barcode
 
@@ -909,7 +934,7 @@ Click the pencil on a user's row. You can change their **role**, and optionally 
 
 ### Assigning roles
 
-Only the four roles listed in [section 3](#3-understanding-user-roles) can be assigned. Roles cannot be created or edited.
+Only the five roles listed in [section 3](#3-understanding-user-roles) can be assigned. Roles cannot be created or edited.
 
 ### Activating and deactivating
 
