@@ -33,6 +33,8 @@
 12B. [Choosing light or dark](#12b-choosing-light-or-dark)
 12C. [POS full screen and the customer display](#12c-pos-full-screen-and-the-customer-display)
 12D. [Reports](#12d-reports)
+12E. [Tills / Terminals](#12e-tills--terminals)
+12F. [Held Sales Review](#12f-held-sales-review)
 13. [Notifications and alerts](#13-notifications-and-alerts)
 14. [Common problems](#14-common-problems)
 
@@ -149,7 +151,9 @@ Click **Profile** in the *Account* section of the sidebar. See [section 12](#12-
 
 ## 3. Understanding user roles
 
-The system has exactly **four roles**. There is no facility to create new roles or to edit which modules a role can reach — the four roles and their permissions are fixed in the program.
+*(Updated 25 August 2026 — a fifth role, Accountant, was added, and several permissions were split or newly enforced. See the notes under the matrix for exactly what changed.)*
+
+The system has exactly **five roles**. There is no facility to create new roles or to edit which modules a role can reach — the five roles and their permissions are fixed in the program.
 
 ### Administrator (`admin`)
 
@@ -172,45 +176,58 @@ Everything operational, plus reports and overrides. A manager can do everything 
 - Post or reverse journal entries
 - Open the Departments screen
 
-A manager **can** void sales, manage users, approve stock requests, and see all accounting reports.
+A manager **can** void sales, manage users, approve stock requests, manage tills/terminals (including force-releasing a stuck one), review and recover held sales, and see all accounting reports.
+
+### Accountant (`accountant`)
+
+*New 25 August 2026.* The books, full stop — Chart of Accounts, General Ledger, Expenses, Profit & Loss, the daily close history, plus **read-only** Sales Reports to reconcile revenue against what was posted. An accountant **cannot** open the POS Terminal, see or touch inventory, approve or pay a purchase order, manage tills, or manage users — and does not see the operational (own-till) sales list a cashier uses, since that's a different screen from the Sales Reports group.
 
 ### Storekeeper (`storekeeper`)
 
-Stock and purchasing only. A storekeeper can reach Products, Inventory, Purchasing, the Barcode Station and Stock Requests. A storekeeper **cannot** open the till, see sales, see customers, see any accounting, or manage users.
+Stock and purchasing only. A storekeeper can reach Products, Inventory, Purchasing, the Barcode Station, Stock Requests, Expiring Soon, and can see (but not pay) Supplier Liabilities. A storekeeper **cannot** open the till, see sales, see customers, see any accounting, approve a purchase order or pay a supplier, or manage users.
 
 ### Cashier (`cashier`)
 
-The till and nothing else. A cashier can use the POS Terminal, see the sales and receipts list, and look up customers. A cashier **cannot** see inventory, products, purchasing, accounting, reports or user management — and cannot void a sale.
+The till and nothing else. A cashier can use the POS Terminal, see their **own** sales and receipts, raise a Stock Request, and see Expiring Soon. A cashier **cannot** see inventory, products, purchasing, accounting, reports, tills/terminals management, another cashier's held sales, or user management — and cannot void a sale. *(25 August 2026: a cashier no longer has a separate Customer Management screen — the till's own phone lookup at checkout still works — and is locked to one till per login; switching tills requires logging out and back in.)*
 
 ### Role / permission matrix
 
 A tick means the role has that permission. These come directly from `roleModules()` in the program.
 
-| Permission (module) | What it controls | Admin | Manager | Storekeeper | Cashier |
-|---|---|:--:|:--:|:--:|:--:|
-| `dashboard` | Main Dashboard | ✔ | ✔ | — | — |
-| `manager_overview` | Manager Overview screen | ✔ | ✔ | — | — |
-| `pos` | POS Terminal | ✔ | ✔ | — | ✔ |
-| `pos_sales` | Sales & Receipts list, receipt reprint | ✔ | ✔ | — | ✔ |
-| `pos_void` | (permission exists; voiding is checked by role — see note) | ✔ | ✔ | — | — |
-| `products` | Products & Prices | ✔ | ✔ | ✔ | — |
-| `inventory` | Inventory: items, movements, categories, units, reports, barcode API | ✔ | ✔ | ✔ | — |
-| `purchasing` | Purchase orders and suppliers | ✔ | ✔ | ✔ | — |
-| `barcode` | Barcode Station and label printing | ✔ | ✔ | ✔ | — |
-| `stock_requests` | Stock requests | ✔ | ✔ | ✔ | — |
-| `customers` | Customer management | ✔ | ✔ | — | ✔ |
-| `accounting` | Accounting overview, ledger, expenses, P&L, Z-report | ✔ | ✔ | — | — |
-| `accounting_manage` | Chart of accounts, manual journal entries, reversals | ✔ | — | — | — |
-| `reports` | (permission exists; see note) | ✔ | ✔ | — | — |
-| `users` | Manage Users | ✔ | ✔ | — | — |
-| `settings` | Inventory Settings | ✔ | ✔ | — | — |
-| `departments` | Enable/disable departments | ✔ | — | — | — |
+| Permission (module) | What it controls | Admin | Manager | Accountant | Storekeeper | Cashier |
+|---|---|:--:|:--:|:--:|:--:|:--:|
+| `dashboard` | Main Dashboard | ✔ | ✔ | ✔ | — | — |
+| `manager_overview` | Manager Overview screen | ✔ | ✔ | — | — | — |
+| `pos` | POS Terminal | ✔ | ✔ | — | — | ✔ |
+| `pos_sales` | Own-till Sales & Receipts list, receipt reprint | ✔ | ✔ | — | — | ✔ |
+| `pos_void` | Void a sale | ✔ | ✔ | — | — | — |
+| `products` | Products & Prices | ✔ | ✔ | — | ✔ | — |
+| `inventory` | Inventory: items, movements, categories, units, reports, disposal | ✔ | ✔ | — | ✔ | — |
+| `purchasing` | Raise purchase orders, receive goods | ✔ | ✔ | — | ✔ | — |
+| `purchasing_approve` | Approve/cancel a PO, pay a supplier | ✔ | ✔ | — | — | — |
+| `barcode` | Barcode Station and label printing | ✔ | ✔ | — | ✔ | — |
+| `stock_requests` | Raise/approve stock requests | ✔ | ✔ | — | ✔ | ✔ |
+| `customers` | Customer management screen | ✔ | ✔ | — | — | — |
+| `accounting` | Accounting overview, ledger, expenses, P&L, Z-report | ✔ | ✔ | ✔ | — | — |
+| `accounting_manage` | Chart of accounts, manual journal entries, reversals | ✔ | — | ✔ | — | — |
+| `sales_reports` | Shop-wide Sales report group (summary/by-cashier/by-terminal) | ✔ | ✔ | ✔ | — | — |
+| `users` | Manage Users | ✔ | ✔ | — | — | — |
+| `settings` | Inventory Settings | ✔ | ✔ | — | — | — |
+| `departments` | Enable/disable departments | ✔ | — | — | — | — |
+| `shop_settings` | Shop identity, receipt, payment methods | ✔ | — | — | — | — |
+| `disposal_approve` | Approve a stock disposal/write-off | ✔ | ✔ | — | — | — |
+| `expiry_alerts` | Expiring Soon screen | ✔ | ✔ | — | ✔ | ✔ |
+| `supplier_liabilities` | Supplier balances (storekeeper: read-only, enforced by the page) | ✔ | ✔ | — | ✔ | — |
+| `fraud_audit` | Cancelled Carts report | ✔ | ✔ | — | — | — |
+| `terminals` | Tills / Terminals management, Force Release | ✔ | ✔ | — | — | — |
+| `held_sales_review` | Held Sales Review — recover an orphaned/expired held sale | ✔ | ✔ | — | — | — |
 
-**Notes on this table (verified from source code):**
+**Notes on this table (verified from source code, 25 August 2026):**
 
-- **`pos_void`** is granted to admin and manager, but the Sales & Receipts screen actually checks the role name directly (`admin` or `manager`) rather than this permission. The outcome is the same, but the permission itself is not what is tested.
-- **`reports`** is granted to admin and manager but is not checked by any page. Inventory Reports is gated by `inventory` instead, which is why a storekeeper can open it.
+- **`pos_void`** is now genuinely checked (`userCan('pos_void')`) on the Sales & Receipts screen — it used to test the role name directly instead, which had the same practical effect but meant the permission listed here wasn't actually what was tested. That drift is fixed.
+- The old **`reports`** permission (granted to admin/manager but checked nowhere — Inventory Reports has always actually gated on `inventory`) was **removed from the system entirely** on 25 August 2026, rather than left as dead weight.
 - **Inventory Settings** and **Manage Users** check the role names `admin` and `manager` directly rather than the `settings` / `users` permissions.
+- A cashier viewing a receipt must be that sale's own cashier (or an admin/manager) — enforced on the page itself, not by a separate permission.
 - Pages that everyone signed in can reach: **Dashboard entry point** (`admin/index.php` — it redirects roles without dashboard access to their own home screen), **Profile**, and **Access denied**.
 
 ---
@@ -274,9 +291,13 @@ There is nothing to start. The till is always ready — scan or tap the first pr
 
 ### Selecting a terminal
 
-The current terminal is named in the top bar (in the screenshot, **Supermarket Counter (SM-01)**). Click it to pick a different one.
+*(Behaviour changed 25 August 2026 — a terminal is now a real, single-holder lock, not just a remembered preference.)*
 
-Your choice is remembered for the rest of your session, so a till at the stationery counter stays on stationery without being re-picked every sale. If you have never chosen one, the system picks the first active terminal for you rather than blocking you.
+Right after logging in, if you don't already hold a till, you're shown **Select a Till** — a list of every till, each marked **Available**, **In use by &lt;name&gt;**, or **Stale — reclaimable** (someone was on it but stopped responding). Pick an available one. You cannot proceed to the checkout screen until you do — there is no more automatic fallback to "the first active till."
+
+The till you pick is named in the top bar (in the screenshot, **Supermarket Counter (SM-01)**) for the rest of this login, but it is **no longer clickable** — there is nothing to switch to from here. **To use a different till, log out and log back in** and pick the other one from the same list. This is deliberate: one cashier can never be on two tills at once, and a till you're actively using cannot be taken by someone else while you're on it.
+
+If your session goes quiet for too long (network drop, laptop asleep) your lock can go stale and you may be asked to pick a till again — your cart-in-progress is not affected, and any sales you'd already held are safe regardless (see "Resuming a held sale" below).
 
 A till belongs to a department, and opens showing that department's stock — a till set to Supermarket opens on supermarket stock, one set to Plumbing opens on plumbing stock. A till set to **General**, or to no department at all, opens showing **everything**. You can switch department by tab at any time, and **All Departments** is always the first tab.
 
@@ -392,15 +413,21 @@ To reprint an old receipt, go to **Sales & Receipts** in the sidebar and use the
 
 ### Holding a sale
 
-Click **Hold Sale**. You are asked for a label (it suggests *"Held HH:MM"* — a customer's name is more useful). The cart is saved on the server, so **any till can resume it**, and your cart clears for the next customer.
+Click **Hold Sale**. A dialog on the page (not a browser pop-up, since 25 August 2026) asks for a label — it suggests *"Held HH:MM"*, but a customer's name is more useful. The cart is saved on the server and your cart clears for the next customer.
+
+*(Behaviour changed 25 August 2026.)* A held sale belongs to **you, on the till you held it on** — no other cashier can see it, resume it, or discard it, even on a different till. It is never lost: if you log out before finishing it, it waits for you rather than disappearing or being deleted (see "What happens if I log out with a sale still held?" below).
 
 *"Nothing to hold."* means the cart is empty.
 
 ### Resuming a held sale
 
-Open the held-sales list from the till, find the sale by its label, and choose to resume it. The cart is restored and you get *"Held sale resumed."* When you complete that sale, the held copy is deleted automatically.
+Open the held-sales list from the till — it only ever shows **your own** held sales on **this** till. Find the sale by its label and choose **Resume**. The cart is restored and you get *"Held sale resumed."* When you complete that sale, the held record is marked completed — it is **not deleted**; a manager can still see it in the shop's history.
 
-You can also discard a held sale without selling it.
+You can also discard a held sale without selling it — you'll be asked for a reason, same as clearing an in-progress cart.
+
+### What happens if I log out with a sale still held?
+
+*(New 25 August 2026.)* Nothing is lost and nothing is deleted. If you log back in yourself — even on a different day — and pick a till, that sale comes back to your held-sales list automatically. **No one else can pick it up in the meantime**, even if they use the same till while you're away. If you genuinely need someone else to finish it (you're off for the day, for example), ask a manager or administrator — they can review it and hand it to whoever is actively on shift, on the **Held Sales Review** screen.
 
 ### Handling an invalid barcode
 
@@ -909,7 +936,7 @@ Click the pencil on a user's row. You can change their **role**, and optionally 
 
 ### Assigning roles
 
-Only the four roles listed in [section 3](#3-understanding-user-roles) can be assigned. Roles cannot be created or edited.
+Only the five roles listed in [section 3](#3-understanding-user-roles) can be assigned. Roles cannot be created or edited.
 
 ### Activating and deactivating
 
@@ -1266,6 +1293,65 @@ You will see *"This report could not be produced. The problem has been logged."*
 Every report works on a phone. The menu slides in from the **☰** button, the filters fold away behind **Filters** (tap it to open them), and wide tables scroll sideways with your finger while the rest of the page stays still.
 
 Print, PDF and CSV all behave the same on a phone as on the desktop — the file contains the whole report, not the part that happened to fit on the screen.
+
+---
+
+## 12E. Tills / Terminals
+
+*New 25 August 2026. Administrator and Manager only — sidebar, under Point of Sale.*
+
+![Tills / Terminals](screenshots/12-tills-terminals.jpg)
+
+This screen manages the physical registers a sale can be rung up on, and — since the terminal-locking change on the same date — shows who is actually on each one right now.
+
+### Adding or editing a till
+
+Click **Add till**, or the pencil on an existing row. A till needs a **name**, a unique **code** (shown on receipts), and a **department** — the stock it opens on by default. Untick **Active** to stop it appearing as a choice for cashiers without losing its sales history.
+
+### Reading the Status column
+
+- **Active** / **Inactive** — whether the till itself is enabled, independent of whether anyone is using it.
+- **In session** (blue) — a cashier is actively logged into this till right now. The name, when they started, and their last activity time are shown underneath (in the screenshot, *test*, started 12:36, last active 13:52).
+- **Stale lock** (amber) — someone was on this till but it's gone quiet past the timeout (network drop, browser crash) without them logging out properly.
+
+### Force-releasing a till
+
+If a till shows **In session** or **Stale lock** but genuinely needs freeing up — the cashier's shift ended without them logging out, or the browser crashed — click the unlock icon and confirm. This immediately signs that cashier out of the till so someone else can use it. Their sale, if one was in progress, is not affected; any sales they had **held** are always safe regardless (see [Held Sales Review](#12f-held-sales-review) below).
+
+You cannot delete a till with sales history — it is deactivated instead, so old receipts still show its name correctly.
+
+---
+
+## 12F. Held Sales Review
+
+*New 25 August 2026. Administrator and Manager only — sidebar, under Point of Sale.*
+
+![Held Sales Review](screenshots/13-held-sales-review.jpg)
+
+Every parked ("held") sale across every till, in one place — a cashier only ever sees their own on their own till, so this is the one screen that shows the whole picture.
+
+### Needs attention
+
+Sales that no longer belong to anyone actively working on them:
+
+- **Orphaned** — a cashier logged out while it was still held.
+- **Expired** — nobody touched it for a long time (about 2 hours by default).
+
+Each row shows the original cashier, till, department, amount, and how long it's been sitting — never deleted, so nothing here is ever silently lost.
+
+### Recovering a held sale
+
+Click **Recover**. Before you do anything, the dialog shows the **full workflow** for that sale — every event from when it was first held through to now (created, logged out, orphaned, marked ageing, expired, and so on) — so you know exactly what happened before deciding what to do.
+
+Choose **which till to give it to** — only tills with a cashier **actively logged in right now** are offered, so it always lands on someone who can actually pick it up immediately — enter a **reason**, and confirm. The sale reappears in that cashier's held-sales list as if it had never been interrupted; who authorized the recovery and why is recorded permanently on the sale.
+
+### Viewing history without recovering
+
+The clock icon next to any row (in either table) opens its full workflow history read-only — useful for completed or cancelled sales, or just to understand what happened to one before deciding whether it needs your attention at all.
+
+### All held sales (reference)
+
+Every held sale ever recorded, whatever its current status — held, resumed, completed, cancelled, orphaned, expired. If one became a real sale, its receipt number links straight to it.
 
 ---
 

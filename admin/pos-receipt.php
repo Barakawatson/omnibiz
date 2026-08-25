@@ -18,6 +18,16 @@ if (!$sale) {
     echo 'Receipt not found.';
     exit;
 }
+// admin/pos-sales.php's own list already scopes a non-admin/manager to
+// their own sales (cashier_id = ?) - this page took an id straight from
+// the query string with no equivalent check, so any cashier could view
+// or print any other cashier's receipt just by editing ?id=.
+$role = $_SESSION['role'] ?? '';
+if (!in_array($role, ['admin', 'manager'], true) && (int)$sale['cashier_id'] !== (int)($_SESSION['id'] ?? 0)) {
+    http_response_code(403);
+    echo 'You do not have permission to view this receipt.';
+    exit;
+}
 
 $autoPrint = !isset($_GET['noprint']);
 $footer = posReceiptFooter($conn);
@@ -123,6 +133,18 @@ function rMoney($v) { return number_format((float)$v); }
         <tr><td>Customer</td><td class="right"><?php echo htmlspecialchars($sale['customer_name'] ?: '-'); ?></td></tr>
         <?php if ($sale['customer_phone']): ?>
         <tr><td></td><td class="right"><?php echo htmlspecialchars($sale['customer_phone']); ?></td></tr>
+        <?php endif; ?>
+        <?php // Institutional details - present only when this sale actually
+              // captured them, so an old receipt (predating this feature,
+              // or a plain walk-in) renders exactly as it did before. ?>
+        <?php if (!empty($sale['customer_address'])): ?>
+        <tr><td></td><td class="right"><?php echo htmlspecialchars($sale['customer_address']); ?></td></tr>
+        <?php endif; ?>
+        <?php if (!empty($sale['customer_tin'])): ?>
+        <tr><td>TIN</td><td class="right"><?php echo htmlspecialchars($sale['customer_tin']); ?></td></tr>
+        <?php endif; ?>
+        <?php if (!empty($sale['customer_email'])): ?>
+        <tr><td></td><td class="right"><?php echo htmlspecialchars($sale['customer_email']); ?></td></tr>
         <?php endif; ?>
         <?php else: ?>
         <tr><td>Customer</td><td class="right">Walk-in</td></tr>

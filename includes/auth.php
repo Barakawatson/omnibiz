@@ -7,9 +7,11 @@
 //   requireRole(['admin', 'manager']);   // only these roles may view
 //   requireModule('inventory');          // or gate by business module
 //
-// Four retail roles:
+// Five retail roles:
 //   admin       - full unrestricted system control
-//   manager     - sales reports, inventory overrides, daily summaries
+//   manager     - operational management, reports, overrides
+//   accountant  - the books: chart of accounts, journal, expenses,
+//                 plus read-only sales figures to reconcile against
 //   storekeeper - stock intake, purchase orders, reorder alerts
 //   cashier     - POS terminal checkout and cash drawer
 // ============================================================
@@ -26,7 +28,7 @@ require_once __DIR__ . '/csrf.php';
 
 /** Every role the system knows (used by manage-users and validation). */
 function allSystemRoles(): array {
-    return ['admin', 'manager', 'storekeeper', 'cashier'];
+    return ['admin', 'manager', 'accountant', 'storekeeper', 'cashier'];
 }
 
 /** Human-readable role names for the UI. */
@@ -34,6 +36,7 @@ function roleLabel(string $role): string {
     $labels = [
         'admin'       => 'Administrator',
         'manager'     => 'Manager',
+        'accountant'  => 'Accountant',
         'storekeeper' => 'Storekeeper',
         'cashier'     => 'Cashier',
     ];
@@ -44,8 +47,9 @@ function roleLabel(string $role): string {
  * Which business modules a role may use. Module keys:
  *   dashboard, manager_overview, pos, pos_sales, pos_void,
  *   products, inventory, purchasing, barcode, stock_requests,
- *   customers, accounting, accounting_manage, reports, users,
- *   settings, departments, shop_settings, disposal_approve
+ *   customers, accounting, accounting_manage, sales_reports, users,
+ *   settings, departments, shop_settings, disposal_approve,
+ *   expiry_alerts, supplier_liabilities, fraud_audit, terminals
  */
 function roleModules(string $role): array {
     switch ($role) {
@@ -55,16 +59,42 @@ function roleModules(string $role): array {
             // what the business sells, not day-to-day management.
             // 'disposal_approve' mirrors 'purchasing_approve': approving a
             // write-off authorizes a loss, it isn't operational work.
+            // 'fraud_audit' (Cancelled Carts) is a supervisor key, held by
+            // admin and manager - a cashier or storekeeper never sees it.
+            // 'terminals' manages the physical tills, not what the shop
+            // sells or its books, so - unlike 'departments' - it is shared
+            // with manager rather than kept admin-only.
+            // 'sales_reports' gates the shop-wide Sales report GROUP
+            // (summary/by_cashier/by_terminal/transactions, etc.) - kept
+            // separate from 'pos_sales' (the operational, own-till-only
+            // sales list a cashier also needs) so granting one never
+            // silently grants the other.
+            // 'held_sales_review' is the manager/admin recovery screen for
+            // orphaned or expired held sales - a cashier only ever sees
+            // their own active ones (enforced in the query itself, not by
+            // this key), so this is purely a supervisor surface, same
+            // sharing rule as 'terminals'.
             return ['dashboard','manager_overview','pos','pos_sales','pos_void','products',
                     'inventory','purchasing','purchasing_approve','barcode','stock_requests','customers',
-                    'accounting','accounting_manage','reports','users','settings','departments',
-                    'shop_settings','disposal_approve'];
+                    'accounting','accounting_manage','sales_reports','users','settings','departments',
+                    'shop_settings','disposal_approve','expiry_alerts','supplier_liabilities','fraud_audit',
+                    'terminals','held_sales_review'];
         case 'manager':
             // Everything operational plus overrides and reports, but the
             // chart of accounts itself stays an admin-only structure.
             return ['dashboard','manager_overview','pos','pos_sales','pos_void','products',
                     'inventory','purchasing','purchasing_approve','barcode','stock_requests','customers',
-                    'accounting','reports','users','settings','disposal_approve'];
+                    'accounting','sales_reports','users','settings','disposal_approve','expiry_alerts',
+                    'supplier_liabilities','fraud_audit','terminals','held_sales_review'];
+        case 'accountant':
+            // The books, full stop - chart of accounts, journal, expenses,
+            // P&L, daily close history - plus read-only sales figures to
+            // reconcile revenue against what was posted. Deliberately no
+            // 'purchasing_approve' (authorizing spend is an operational
+            // decision, not a bookkeeping one), no POS/inventory/terminal
+            // access, and no 'pos_sales' - they read sales through the
+            // report group, not the till's own transaction list.
+            return ['dashboard','accounting','accounting_manage','sales_reports'];
         case 'storekeeper':
             // 'purchasing' lets a storekeeper raise a purchase order and
             // book goods in when they arrive - their job. It deliberately
@@ -72,9 +102,18 @@ function roleModules(string $role): array {
             // commits the shop to spending, and recording a payment moves
             // real money out of an account. Both are a supervisor's
             // decision, so only admin and manager hold that key.
-            return ['products','inventory','purchasing','barcode','stock_requests'];
+            // 'supplier_liabilities' is granted read-only here (enforced
+            // by the page itself, not by a separate module key) so a
+            // storekeeper can see what's owed without being able to pay it.
+            return ['products','inventory','purchasing','barcode','stock_requests','expiry_alerts',
+                    'supplier_liabilities'];
         case 'cashier':
-            return ['pos','pos_sales','customers'];
+            // No 'customers': the till's own phone-lookup/autofill goes
+            // through api/customer-lookup.php (gated on 'pos') and
+            // posCheckout()'s own merge logic, never through the full
+            // customer CRUD admin page - a cashier never needed that key
+            // for checkout, it just hadn't been separated out before.
+            return ['pos','pos_sales','stock_requests','expiry_alerts'];
         default:
             return [];
     }
@@ -97,6 +136,7 @@ function userCan(string $module): bool {
 function roleHome(string $role): string {
     switch ($role) {
         case 'manager':     return 'manager-overview.php';
+        case 'accountant':  return 'accounting-dashboard.php';
         case 'storekeeper': return 'inventory-dashboard.php';
         case 'cashier':     return 'pos.php';
         case 'admin':       return 'index.php';
@@ -104,10 +144,17 @@ function roleHome(string $role): string {
     }
 }
 
-/** Absolute clean URL a role should be sent to straight after login. */
+/**
+ * Absolute clean URL a role should be sent to straight after login.
+ * Accountant has no clean-URL alias of its own yet (the .htaccess
+ * rewrites are hand-listed per role) - it goes straight to the real
+ * admin/ path, the same way every role reached its page before clean
+ * URLs existed for it.
+ */
 function roleHomeUrl(string $role): string {
     switch ($role) {
         case 'manager':     return 'manager/overview';
+        case 'accountant':  return 'admin/accounting-dashboard.php';
         case 'storekeeper': return 'inventory';
         case 'cashier':     return 'pos/terminal';
         case 'admin':       return 'admin/dashboard';

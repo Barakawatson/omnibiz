@@ -98,39 +98,61 @@
         const sections = document.querySelectorAll('.mx-section');
         if (!sections.length) { return; }
 
-        let open = [];
-        try { open = JSON.parse(localStorage.getItem(LS_SECTIONS)) || []; } catch (e) { open = []; }
+        // True single-open accordion: at most one section expanded at a
+        // time. The section containing the current page is server-side
+        // truth (navSectionOpen() already stamped it open/has-active
+        // before this script ran) - a real navigation always re-derives
+        // the right section that way, so nothing here needs to remember
+        // MULTIPLE previously-open sections across page loads. What used
+        // to be persisted as an array let sections accumulate open
+        // forever; only the single most-recent key is kept now, purely so
+        // a same-page toggle-then-reload (e.g. F5) doesn't spring the menu
+        // back to whatever the URL happens to land on with no user choice
+        // remembered at all.
+        let openKey = null;
+        try { openKey = localStorage.getItem(LS_SECTIONS) || null; } catch (e) { openKey = null; }
+
+        function closeAllExcept(exceptSec) {
+            sections.forEach(other => {
+                if (other === exceptSec) { return; }
+                other.classList.remove('open');
+                const otherToggle = other.querySelector('.mx-section-toggle');
+                if (otherToggle) { otherToggle.setAttribute('aria-expanded', 'false'); }
+            });
+        }
+
+        let activeSec = null;
+        sections.forEach(sec => {
+            // A section containing the current page is always expanded and
+            // flagged, so the user can see where they are at a glance.
+            if (sec.querySelector('a.mx-link.active')) {
+                sec.classList.add('open', 'has-active');
+                activeSec = sec;
+            }
+        });
+        // No page-derived active section (rare - e.g. a top-level link):
+        // fall back to whichever single section was last opened by hand.
+        if (!activeSec && openKey) {
+            sections.forEach(sec => { if (sec.dataset.section === openKey) { sec.classList.add('open'); } });
+        }
+        if (activeSec) { closeAllExcept(activeSec); }
 
         sections.forEach(sec => {
             const key = sec.dataset.section || '';
             const toggle = sec.querySelector('.mx-section-toggle');
             if (!toggle) { return; }
-
-            // A section containing the current page is always expanded and
-            // flagged, so the user can see where they are at a glance.
-            const hasActive = !!sec.querySelector('a.mx-link.active');
-            if (hasActive) {
-                sec.classList.add('open', 'has-active');
-                if (open.indexOf(key) === -1) { open.push(key); }
-            } else if (open.indexOf(key) !== -1) {
-                sec.classList.add('open');
-            }
-
             toggle.setAttribute('aria-expanded', sec.classList.contains('open') ? 'true' : 'false');
 
             toggle.addEventListener('click', function () {
-                sec.classList.toggle('open');
-                const isOpen = sec.classList.contains('open');
-                toggle.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
-
-                const i = open.indexOf(key);
-                if (isOpen && i === -1) { open.push(key); }
-                if (!isOpen && i !== -1) { open.splice(i, 1); }
-                try { localStorage.setItem(LS_SECTIONS, JSON.stringify(open)); } catch (e) {}
+                const willOpen = !sec.classList.contains('open');
+                // Collapse every other section before applying this one's
+                // own new state - the actual "only one open at a time" rule.
+                closeAllExcept(sec);
+                sec.classList.toggle('open', willOpen);
+                toggle.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
+                try { localStorage.setItem(LS_SECTIONS, willOpen ? key : ''); } catch (e) {}
             });
         });
-
-        try { localStorage.setItem(LS_SECTIONS, JSON.stringify(open)); } catch (e) {}
     };
 
     /* ========================================================
@@ -246,7 +268,8 @@
         requests:      { title: 'Stock request',     type: 'warning', href: 'inventory-requests.php',        verb: 'awaiting approval' },
         open_pos:      { title: 'Purchase orders',   type: 'info',    href: 'inventory-purchase-orders.php', verb: 'still open' },
         unclosed_days: { title: 'Unclosed day',      type: 'warning', href: 'z-report.php',                  verb: 'never reconciled' },
-        disposal:      { title: 'Disposal request',  type: 'warning', href: 'inventory-disposal.php',        verb: 'awaiting approval' }
+        disposal:      { title: 'Disposal request',  type: 'warning', href: 'inventory-disposal.php',        verb: 'awaiting approval' },
+        cancelled_carts_today: { title: 'Cart cancelled', type: 'danger', href: 'report.php?g=audit&r=cancelled_carts', verb: 'cancelled today - admin only' }
     };
 
     MX.watchAlerts = function (intervalMs) {

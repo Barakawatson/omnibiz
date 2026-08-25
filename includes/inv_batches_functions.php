@@ -141,6 +141,41 @@ function deductFefoBatches(mysqli $conn, int $itemId, float $qtyNeeded): array {
 }
 
 /**
+ * Deduct a disposal quantity from ONE specific batch (chosen by the
+ * requester, not FEFO-allocated) - unlike deductFefoBatches(), which
+ * spreads a deduction across whichever batches are earliest-active,
+ * a disposal targets exactly the batch the storekeeper flagged as
+ * expired. Sets status to 'disposed' (not 'depleted' - that status is
+ * for stock sold through normally) once the batch reaches ~0.
+ * Must run inside the caller's transaction. Returns [ok, message].
+ */
+function disposeFromBatch(mysqli $conn, int $batchId, float $qty): array {
+    if ($batchId <= 0 || $qty <= 0) { return [false, 'Nothing to dispose.']; }
+
+    $stmt = $conn->prepare("SELECT quantity FROM inv_batches WHERE id = ? FOR UPDATE");
+    $stmt->bind_param('i', $batchId);
+    $stmt->execute();
+    $batch = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+    if (!$batch) { return [false, 'Batch not found.']; }
+    if ($qty > (float)$batch['quantity'] + 0.0005) {
+        return [false, 'Cannot dispose more than the ' . $batch['quantity'] . ' remaining in this batch.'];
+    }
+
+    $upd = $conn->prepare(
+        "UPDATE inv_batches
+         SET quantity = quantity - ?,
+             status = IF(quantity - ? <= 0.0005, 'disposed', status)
+         WHERE id = ?"
+    );
+    $upd->bind_param('ddi', $qty, $qty, $batchId);
+    if (!$upd->execute()) { $err = $upd->error; $upd->close(); return [false, 'Could not update the batch: ' . $err]; }
+    $upd->close();
+
+    return [true, 'Disposed from batch.'];
+}
+
+/**
  * Re-credit specific batches (a void/return). $items: [['batch_id','qty'], ...].
  * Reactivates a 'depleted' batch back to 'active' when stock returns to
  * it. Must run inside the caller's transaction.
@@ -179,4 +214,27 @@ function earliestActiveBatchExpiry(mysqli $conn, int $itemId): ?string {
     $row = $stmt->get_result()->fetch_assoc();
     $stmt->close();
     return $row ? $row['expiry_date'] : null;
+}
+
+/**
+ * Keep inv_items.expiry_date in step with the item's own batches.
+ *
+ * retailIsExpired()/retailExpiryBlockReason()/retailExpiryDiscount() -
+ * the checkout block and the near-expiry markdown - are NOT batch-aware:
+ * they read this one item-level field. FEFO always sells the earliest
+ * active batch first, so that batch's date is exactly "when would the
+ * next unit sold actually expire" - setting the field to it keeps the
+ * old single-field logic correct without having to touch it.
+ *
+ * Call this any time a batch is created or a batch's active/quantity
+ * status changes for this item (received stock, FEFO deduction,
+ * disposal). Null when no active batch carries a date - nothing
+ * currently on hand is known to expire.
+ */
+function refreshItemExpiryFromBatches(mysqli $conn, int $itemId): void {
+    $date = earliestActiveBatchExpiry($conn, $itemId);
+    $stmt = $conn->prepare("UPDATE inv_items SET expiry_date = ? WHERE id = ?");
+    $stmt->bind_param('si', $date, $itemId);
+    $stmt->execute();
+    $stmt->close();
 }

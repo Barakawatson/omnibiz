@@ -7,7 +7,7 @@
 // ONLY for approved quantities. Complete history is kept.
 // ============================================================
 require_once '../includes/auth.php';
-requireModule('inventory');
+requireModule('stock_requests');
 // Reject any POST that does not carry this session's CSRF token.
 // Placed before every handler on this page, and a no-op on GET.
 csrfRequire();
@@ -71,7 +71,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 // the value out of the SQL text regardless.
 $statusFilter = $_GET['status'] ?? '';
 $statusValid  = in_array($statusFilter, ['pending','approved','partially_approved','rejected'], true);
-$where = $statusValid ? "r.status = ?" : "1=1";
+
+// A cashier (or anyone else without review rights) can raise requests but
+// must only ever see their own - reviewers keep the full list. Built as
+// conds/params/types together so the type string can't drift from the
+// argument list as filters are added.
+$conds = [];
+$params = [];
+$types = '';
+if ($statusValid) { $conds[] = 'r.status = ?'; $params[] = $statusFilter; $types .= 's'; }
+if (!$canReview) { $conds[] = 'r.requested_by = ?'; $params[] = $userId; $types .= 'i'; }
+$where = $conds ? implode(' AND ', $conds) : '1=1';
 
 $stmt = $conn->prepare(
     "SELECT r.*,
@@ -80,7 +90,7 @@ $stmt = $conn->prepare(
      WHERE $where
      ORDER BY r.created_at DESC
      LIMIT 300");
-if ($statusValid) { $stmt->bind_param('s', $statusFilter); }
+if ($params) { $stmt->bind_param($types, ...$params); }
 $stmt->execute();
 $requests = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
 $stmt->close();
@@ -104,8 +114,18 @@ $activeItems = $conn->query(
      WHERE i.status = 'active' AND i.deleted_at IS NULL"
      . catalogDepartmentFilterSql($conn, 'i') . " ORDER BY i.name")->fetch_all(MYSQLI_ASSOC);
 
+// Same own-requests-only scope as the list above, so a cashier's status
+// badges never imply visibility into totals they can't actually see.
 $statusCounts = [];
-$scRes = $conn->query("SELECT status, COUNT(*) AS c FROM inv_stock_requests GROUP BY status");
+if ($canReview) {
+    $scRes = $conn->query("SELECT status, COUNT(*) AS c FROM inv_stock_requests GROUP BY status");
+} else {
+    $scStmt = $conn->prepare("SELECT status, COUNT(*) AS c FROM inv_stock_requests WHERE requested_by = ? GROUP BY status");
+    $scStmt->bind_param('i', $userId);
+    $scStmt->execute();
+    $scRes = $scStmt->get_result();
+    $scStmt->close();
+}
 if ($scRes) { foreach ($scRes->fetch_all(MYSQLI_ASSOC) as $r) { $statusCounts[$r['status']] = (int)$r['c']; } }
 
 $statusMeta = [
@@ -116,7 +136,11 @@ $statusMeta = [
 ];
 
 $pageTitle = 'Stock Requests';
-$breadcrumbs = [['Dashboard', 'index.php'], ['Inventory', 'inventory-dashboard.php'], ['Stock Requests']];
+// A cashier reaches this page via stock_requests alone and cannot open
+// inventory-dashboard.php (requireModule('inventory') would turn it
+// away) - the crumb is plain text for them, a link for anyone who can
+// actually follow it.
+$breadcrumbs = [['Dashboard', 'index.php'], userCan('inventory') ? ['Inventory', 'inventory-dashboard.php'] : ['Inventory'], ['Stock Requests']];
 include 'inventory-header.php';
 ?>
 <div class="inv-page-header">

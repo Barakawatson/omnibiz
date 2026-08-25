@@ -9,7 +9,7 @@ Describes the system as implemented. Cross-reference: `CLAUDE.md` (repository co
 | Layer | Choice | Why (as recorded in the codebase) |
 |---|---|---|
 | Language | PHP 8.2, procedural + prepared statements | No framework, no ORM — smaller attack surface, no build step, runs on stock XAMPP |
-| Database | MariaDB 10.4, database `retailer_shop`, port 3306 | 33 tables |
+| Database | MariaDB 10.4, database `retailer_shop`, port 3306 | 34 tables |
 | Web server | Apache, port 8081, app served at `/Home/` | `.htaccess` rewrites (redirects, not internal rewrites — see §7) |
 | Frontend | Bootstrap 5.3.2 + Font Awesome 6.4.0 + Poppins (CDN), vanilla JS | No second framework introduced |
 | PDF generation | In-house (`includes/pdf_writer.php`) | No Composer/vendor directory exists; avoids a third-party library nobody can patch |
@@ -23,15 +23,16 @@ No package manager, no Composer, no npm, no build step anywhere in the stack. Th
 includes/     db.php, auth.php, session.php, csrf.php, core_schema.php,
               remember_me.php, shop_settings.php, business_types.php,
               uploads.php, report_functions.php, pdf_writer.php,
-              *_schema.php, *_functions.php, stock_ledger.php   (21 files)
-admin/        41 staff-facing pages; sidebar-admin.php + sidebar-nav.php +
+              inv_batches_functions.php (FEFO allocation, item-expiry sync),
+              *_schema.php, *_functions.php, stock_ledger.php
+admin/        staff-facing pages; sidebar-admin.php + sidebar-nav.php +
               inventory-header/footer.php are shared chrome
-admin/api/    JSON endpoints (POS scanning/checkout, products-scan)
+admin/api/    JSON endpoints (POS scanning/checkout/cancel-cart, stock-in, products-scan)
 admin/partials/  page-header.php, empty-state.php, pagination.php, setup-required.php, first-run.php
 assets/css/admin/  styles.css (legacy remnant, loads first) then ui.css (design system)
-assets/js/admin/   ui.js — toasts, filters, sidebar, modals, live alert badges
-assets/uploads/    shop_products/, profile_admin/, po_invoices/, shop_logo/ — the
-                   only directories the app writes to
+assets/js/admin/   ui.js — toasts, filters, single-open sidebar accordion, modals, live alert badges
+assets/uploads/    shop_products/, profile_admin/, po_invoices/, efd_receipts/, shop_logo/ —
+                   the only directories the app writes to
 docs/          USER_GUIDE, TECHNICAL_DOCUMENTATION, SYSTEM_OPERATIONS_HOW_TO_GUIDE,
                TRA_FISCAL_INTEGRATION_AUDIT, specs/ (this set), screenshots/
 ```
@@ -89,7 +90,9 @@ Known, documented, **not yet fixed**: no login rate-limiting; `includes/db.php` 
 
 ## 6. Reporting architecture
 
-One shared renderer (`admin/report.php`, driven by `includes/report_functions.php`) for 23 reports. A report supplies four things — `$columns`, `$rows`, `$footer`, `$align` — plus optional `$metrics`/`$chart`/`$supports`; the renderer does pagination (`rqPaged()`, skipped for exports — an export is always the full filtered set), CSV, PDF (via the in-house `pdf_writer.php`) and print. Financial reports call the same authoritative functions the rest of the app uses (`accProfitAndLoss()`, `accTrialBalance()`, etc.) rather than reimplementing arithmetic — this is treated as an absolute rule, not a preference.
+One shared renderer (`admin/report.php`, driven by `includes/report_functions.php`) for every report, grouped into catalogue sections (Sales, Inventory, Purchasing, Accounting, and — newer — Audit). A report supplies four things — `$columns`, `$rows`, `$footer`, `$align` — plus optional `$metrics`/`$chart`/`$supports`; the renderer does pagination (`rqPaged()`, skipped for exports — an export is always the full filtered set), CSV, PDF (via the in-house `pdf_writer.php`) and print. Financial reports call the same authoritative functions the rest of the app uses (`accProfitAndLoss()`, `accTrialBalance()`, etc.) rather than reimplementing arithmetic — this is treated as an absolute rule, not a preference.
+
+Gating is per-**group**, not per-report — a group's `module` key is checked once (`requireModule()`) for every report inside it. This is why a genuinely admin-only report needs its own catalogue group: the Audit group exists solely to carry the `fraud_audit` module key (granted to `admin` only, not `manager`), separate from every other group here which manager also holds.
 
 ## 7. Known technical debt (explicit, not hidden)
 

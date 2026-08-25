@@ -69,7 +69,7 @@ $current_date_display = formatFullDate(date('Y-m-d H:i:s'));
  * the pattern.
  */
 function customerSearch(mysqli $conn, string $search): array {
-    $sql = "SELECT id, name, phone_number FROM customer";
+    $sql = "SELECT id, name, phone_number, address, tin, email FROM customer";
     $search = trim($search);
 
     if ($search === '') {
@@ -102,6 +102,9 @@ $customers = isset($_GET['ajax_search']) ? [] : customerSearch($conn, $search);
 if (isset($_POST['add_customer'])) {
     $name = $_POST['name'];
     $phone_number = formatPhoneNumber($_POST['phone_number']);
+    $address = trim($_POST['address'] ?? '') ?: null;
+    $tin = trim($_POST['tin'] ?? '') ?: null;
+    $email = trim($_POST['email'] ?? '') ?: null;
 
     // Validate input
     $errors = [];
@@ -126,8 +129,8 @@ if (isset($_POST['add_customer'])) {
 
     if (empty($errors)) {
         // Add new customer
-        $insert_query = $conn->prepare("INSERT INTO customer (name, phone_number, registration_date) VALUES (?, ?, NOW())");
-        $insert_query->bind_param("ss", $name, $phone_number);
+        $insert_query = $conn->prepare("INSERT INTO customer (name, phone_number, address, tin, email, registration_date) VALUES (?, ?, ?, ?, ?, NOW())");
+        $insert_query->bind_param("sssss", $name, $phone_number, $address, $tin, $email);
 
         if ($insert_query->execute()) {
             $success_message = "Customer successfully added";
@@ -147,6 +150,9 @@ if (isset($_POST['update_customer'])) {
     $id = $_POST['id'];
     $name = $_POST['name'];
     $phone_number = formatPhoneNumber($_POST['phone_number']);
+    $address = trim($_POST['address'] ?? '') ?: null;
+    $tin = trim($_POST['tin'] ?? '') ?: null;
+    $email = trim($_POST['email'] ?? '') ?: null;
 
     // Validate input
     $errors = [];
@@ -171,8 +177,8 @@ if (isset($_POST['update_customer'])) {
 
     if (empty($errors)) {
         // Update customer data
-        $update_query = $conn->prepare("UPDATE customer SET name = ?, phone_number = ? WHERE id = ?");
-        $update_query->bind_param("ssi", $name, $phone_number, $id);
+        $update_query = $conn->prepare("UPDATE customer SET name = ?, phone_number = ?, address = ?, tin = ?, email = ? WHERE id = ?");
+        $update_query->bind_param("sssssi", $name, $phone_number, $address, $tin, $email, $id);
 
         if ($update_query->execute()) {
             $success_message = "Customer data successfully updated";
@@ -243,6 +249,7 @@ if (isset($_GET['ajax_search'])) {
                             <th style="width:64px;" class="ui-col-optional">No</th>
                             <th>Customer</th>
                             <th>Phone number</th>
+                            <th>TIN</th>
                             <th style="width:110px;"><span class="visually-hidden">Actions</span></th>
                         </tr>
                     </thead>
@@ -250,21 +257,26 @@ if (isset($_GET['ajax_search'])) {
 
         $no = 1;
         foreach ($rows as $row) {
-            $name  = htmlspecialchars($row['name'], ENT_QUOTES);
-            $phone = htmlspecialchars($row['phone_number'], ENT_QUOTES);
-            $id    = (int)$row['id'];
+            $name    = htmlspecialchars($row['name'], ENT_QUOTES);
+            $phone   = htmlspecialchars($row['phone_number'], ENT_QUOTES);
+            $address = htmlspecialchars($row['address'] ?? '', ENT_QUOTES);
+            $tin     = htmlspecialchars($row['tin'] ?? '', ENT_QUOTES);
+            $email   = htmlspecialchars($row['email'] ?? '', ENT_QUOTES);
+            $id      = (int)$row['id'];
             $searchHay = htmlspecialchars(strtolower($row['name'] . ' ' . $row['phone_number']), ENT_QUOTES);
 
             echo '<tr data-search="' . $searchHay . '">
                     <td class="ui-col-optional"><span class="ui-code">' . $no++ . '</span></td>
                     <td style="font-weight:500;">' . $name . '</td>
                     <td><span class="ui-num">' . $phone . '</span></td>
+                    <td>' . ($tin !== '' ? $tin : '<span class="text-muted">—</span>') . '</td>
                     <td>
                         <div class="d-flex gap-1 justify-content-end">
                             <button type="button" class="ui-btn ui-btn-secondary ui-btn-sm ui-btn-icon"
                                     title="Edit ' . $name . '" aria-label="Edit ' . $name . '"
-                                    onclick="openEditModal(' . $id . ', this.dataset.name, this.dataset.phone)"
-                                    data-name="' . $name . '" data-phone="' . $phone . '">
+                                    onclick="openEditModal(' . $id . ', this.dataset.name, this.dataset.phone, this.dataset.address, this.dataset.tin, this.dataset.email)"
+                                    data-name="' . $name . '" data-phone="' . $phone . '"
+                                    data-address="' . $address . '" data-tin="' . $tin . '" data-email="' . $email . '">
                                 <i class="fas fa-pen"></i>
                             </button>
                             <button type="button" class="ui-btn ui-btn-danger ui-btn-sm ui-btn-icon"
@@ -359,25 +371,31 @@ include 'partials/page-header.php';
                         <th style="width:64px;" class="ui-col-optional">No</th>
                         <th>Customer</th>
                         <th>Phone number</th>
+                        <th>TIN</th>
                         <th style="width:110px;"><span class="visually-hidden">Actions</span></th>
                     </tr>
                 </thead>
                 <tbody>
                     <?php $no = 1; foreach ($customers as $row):
-                        $cName  = htmlspecialchars($row['name'], ENT_QUOTES);
-                        $cPhone = htmlspecialchars($row['phone_number'], ENT_QUOTES);
+                        $cName    = htmlspecialchars($row['name'], ENT_QUOTES);
+                        $cPhone   = htmlspecialchars($row['phone_number'], ENT_QUOTES);
+                        $cAddress = htmlspecialchars($row['address'] ?? '', ENT_QUOTES);
+                        $cTin     = htmlspecialchars($row['tin'] ?? '', ENT_QUOTES);
+                        $cEmail   = htmlspecialchars($row['email'] ?? '', ENT_QUOTES);
                         $searchHay = htmlspecialchars(strtolower($row['name'] . ' ' . $row['phone_number']), ENT_QUOTES);
                     ?>
                     <tr data-search="<?php echo $searchHay; ?>">
                         <td class="ui-col-optional"><span class="ui-code"><?php echo $no++; ?></span></td>
                         <td style="font-weight:500;"><?php echo $cName; ?></td>
                         <td><span class="ui-num"><?php echo $cPhone; ?></span></td>
+                        <td><?php echo $cTin !== '' ? $cTin : '<span class="text-muted">—</span>'; ?></td>
                         <td>
                             <div class="d-flex gap-1 justify-content-end">
                                 <button type="button" class="ui-btn ui-btn-secondary ui-btn-sm ui-btn-icon"
                                         title="Edit <?php echo $cName; ?>" aria-label="Edit <?php echo $cName; ?>"
                                         data-name="<?php echo $cName; ?>" data-phone="<?php echo $cPhone; ?>"
-                                        onclick="openEditModal(<?php echo (int)$row['id']; ?>, this.dataset.name, this.dataset.phone)">
+                                        data-address="<?php echo $cAddress; ?>" data-tin="<?php echo $cTin; ?>" data-email="<?php echo $cEmail; ?>"
+                                        onclick="openEditModal(<?php echo (int)$row['id']; ?>, this.dataset.name, this.dataset.phone, this.dataset.address, this.dataset.tin, this.dataset.email)">
                                     <i class="fas fa-pen"></i>
                                 </button>
                                 <button type="button" class="ui-btn ui-btn-danger ui-btn-sm ui-btn-icon"
@@ -426,11 +444,25 @@ include 'partials/page-header.php';
                         <label class="form-label" for="add_name">Name<span class="ui-required">*</span></label>
                         <input type="text" class="form-control" id="add_name" name="name" required maxlength="150">
                     </div>
-                    <div class="mb-0">
+                    <div class="mb-3">
                         <label class="form-label" for="add_phone">Phone number<span class="ui-required">*</span></label>
                         <input type="text" class="form-control" id="add_phone" name="phone_number" required maxlength="30"
                                placeholder="07XX XXX XXX" inputmode="tel">
                         <div class="form-text">Saved as +255… — this is how the customer is identified at the till.</div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label" for="add_address">Address <span class="text-muted">(optional)</span></label>
+                        <input type="text" class="form-control" id="add_address" name="address" maxlength="255">
+                    </div>
+                    <div class="row g-2 mb-0">
+                        <div class="col-6">
+                            <label class="form-label" for="add_tin">TIN <span class="text-muted">(optional)</span></label>
+                            <input type="text" class="form-control" id="add_tin" name="tin" maxlength="30">
+                        </div>
+                        <div class="col-6">
+                            <label class="form-label" for="add_email">Email <span class="text-muted">(optional)</span></label>
+                            <input type="email" class="form-control" id="add_email" name="email" maxlength="120">
+                        </div>
                     </div>
                 </div>
                 <div class="modal-footer">
@@ -460,9 +492,23 @@ include 'partials/page-header.php';
                         <label class="form-label" for="edit_name">Name<span class="ui-required">*</span></label>
                         <input type="text" class="form-control" id="edit_name" name="name" required maxlength="150">
                     </div>
-                    <div class="mb-0">
+                    <div class="mb-3">
                         <label class="form-label" for="edit_phone_number">Phone number<span class="ui-required">*</span></label>
                         <input type="text" class="form-control" id="edit_phone_number" name="phone_number" required maxlength="30" inputmode="tel">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label" for="edit_address">Address <span class="text-muted">(optional)</span></label>
+                        <input type="text" class="form-control" id="edit_address" name="address" maxlength="255">
+                    </div>
+                    <div class="row g-2 mb-0">
+                        <div class="col-6">
+                            <label class="form-label" for="edit_tin">TIN <span class="text-muted">(optional)</span></label>
+                            <input type="text" class="form-control" id="edit_tin" name="tin" maxlength="30">
+                        </div>
+                        <div class="col-6">
+                            <label class="form-label" for="edit_email">Email <span class="text-muted">(optional)</span></label>
+                            <input type="email" class="form-control" id="edit_email" name="email" maxlength="120">
+                        </div>
                     </div>
                 </div>
                 <div class="modal-footer">
@@ -507,10 +553,13 @@ include 'partials/page-header.php';
 <?php
 $pageScript = <<<'HTML'
 <script>
-function openEditModal(id, name, phone_number) {
+function openEditModal(id, name, phone_number, address, tin, email) {
     document.getElementById('edit_id').value = id;
     document.getElementById('edit_name').value = name;
     document.getElementById('edit_phone_number').value = phone_number;
+    document.getElementById('edit_address').value = address || '';
+    document.getElementById('edit_tin').value = tin || '';
+    document.getElementById('edit_email').value = email || '';
     bootstrap.Modal.getOrCreateInstance(document.getElementById('editModal')).show();
 }
 

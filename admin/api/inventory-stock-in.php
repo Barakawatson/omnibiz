@@ -10,6 +10,9 @@
 //   quantity            - amount received, or counted quantity in 'set' mode
 //   mode                - 'add' (default) or 'set' (physical count)
 //   unit_cost?          - purchase cost, updates weighted-average cost
+//   expiry_date?        - best-before date for this delivery ('add' mode
+//                         only); creates a dated batch and refreshes the
+//                         item's own expiry_date to match
 //   reason?
 //
 // Response: { ok, item:{id,name,stock}, message }
@@ -40,6 +43,7 @@ $quantity = (float)($body['quantity'] ?? 0);
 $mode     = ($body['mode'] ?? 'add') === 'set' ? 'set' : 'add';
 $unitCost = (float)($body['unit_cost'] ?? 0);
 $reason   = trim((string)($body['reason'] ?? ''));
+$expiry   = trim((string)($body['expiry_date'] ?? '')) ?: null;
 
 // Resolve the item from the scanned barcode when no id was given.
 if ($itemId <= 0 && $barcode !== '') {
@@ -68,7 +72,8 @@ if ($itemId <= 0) {
     (int)($_SESSION['id'] ?? 0) ?: null,
     $mode,
     $unitCost,
-    $reason
+    $reason,
+    $expiry
 );
 
 if (!$ok) {

@@ -18,8 +18,6 @@ $reports = [
     'supplier_purchases'=> 'Supplier Purchases',
     'waste'            => 'Waste (damage / expire / loss)',
     'adjustments'      => 'Stock Adjustment History',
-    'sales_by_department' => 'Sales by Department',
-    'best_sellers'     => 'Best Sellers',
     'transactions'     => 'Inventory Transaction History',
 ];
 $report = $_GET['report'] ?? 'valuation';
@@ -179,59 +177,12 @@ switch ($report) {
             ($r['quantity']>0?'+':'').invQty($r['quantity']), invQty($r['qty_before']), invQty($r['qty_after']), $r['reason'] ?: '—', $r['username'] ?: 'System'];
         break;
 
-    case 'sales_by_department':
-        // Sales value, cost and margin split by the department the
-        // item belongs to - the supermarket/stationery view of trade.
-        $columns = ['Department','Units Sold','Sales Value','Cost of Sales','Gross Profit','Margin'];
-        $align = [1=>'r',2=>'r',3=>'r',4=>'r',5=>'r'];
-        $res = reportRows($conn, "SELECT COALESCE(i.department,'general') AS dept,
-                SUM(li.quantity) AS qty,
-                SUM(li.line_total) AS revenue,
-                SUM(li.quantity * li.unit_cost) AS cost
-            FROM sales_transaction_items li
-            JOIN sales_transactions t ON t.id = li.transaction_id AND t.status='completed'
-            LEFT JOIN inv_items i ON i.id = li.item_id
-            WHERE t.created_at BETWEEN ? AND ?
-            GROUP BY COALESCE(i.department,'general') ORDER BY revenue DESC", $fromDT, $toDT);
-        $tr=0; $tc=0;
-        foreach ($res as $r) {
-            $rev=(float)$r['revenue']; $cost=(float)$r['cost']; $profit=$rev-$cost;
-            $tr+=$rev; $tc+=$cost;
-            $rows[] = [catalogDepartmentLabel($r['dept']), invQty($r['qty']),
-                number_format($rev,2,'.',','), number_format($cost,2,'.',','),
-                number_format($profit,2,'.',','),
-                ($rev>0 ? round(($profit/$rev)*100,1).'%' : '—')];
-        }
-        $footer = ['Total','', number_format($tr,2,'.',','), number_format($tc,2,'.',','),
-                   number_format($tr-$tc,2,'.',','),
-                   ($tr>0 ? round((($tr-$tc)/$tr)*100,1).'%' : '—')];
-        break;
-
-    case 'best_sellers':
-        // What actually sold, by value - the buying list for reordering.
-        $columns = ['Product','Department','Units Sold','Sales Value','Gross Profit','In Stock'];
-        $align = [2=>'r',3=>'r',4=>'r',5=>'r'];
-        $res = reportRows($conn, "SELECT li.item_name, COALESCE(i.department,'general') AS dept,
-                SUM(li.quantity) AS qty,
-                SUM(li.line_total) AS revenue,
-                SUM(li.line_total - (li.quantity * li.unit_cost)) AS profit,
-                MAX(i.current_stock) AS stock
-            FROM sales_transaction_items li
-            JOIN sales_transactions t ON t.id = li.transaction_id AND t.status='completed'
-            LEFT JOIN inv_items i ON i.id = li.item_id
-            WHERE t.created_at BETWEEN ? AND ?
-            GROUP BY li.item_id, li.item_name, COALESCE(i.department,'general')
-            ORDER BY revenue DESC LIMIT 200", $fromDT, $toDT);
-        $tr=0; $tp=0;
-        foreach ($res as $r) {
-            $tr+=(float)$r['revenue']; $tp+=(float)$r['profit'];
-            $rows[] = [$r['item_name'], catalogDepartmentLabel($r['dept']), invQty($r['qty']),
-                number_format((float)$r['revenue'],2,'.',','),
-                number_format((float)$r['profit'],2,'.',','),
-                invQty($r['stock'])];
-        }
-        $footer = ['Total','','', number_format($tr,2,'.',','), number_format($tp,2,'.',','), ''];
-        break;
+    // sales_by_department / best_sellers were removed from here - both
+    // duplicated reports that already exist, correctly gated, in the
+    // main Reporting Centre (sales.by_department, sales.by_product), and
+    // their only distinguishing effect was leaking Sales Value, Cost of
+    // Sales, Gross Profit and Margin to anyone holding just 'inventory'
+    // (Stock Keeper), who has no 'sales_reports' or 'accounting' key.
 
     case 'transactions':
         $columns = ['Date','Item','Type','Qty','Before','After','Unit Cost','Reason','User'];

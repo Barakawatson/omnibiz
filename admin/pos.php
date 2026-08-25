@@ -25,22 +25,72 @@ $cashierName = $_SESSION['username'] ?? '';
 function posFlash($type, $msg) { $_SESSION['inv_flash'] = ['type' => $type, 'msg' => $msg]; }
 
 $terminals = posGetTerminals($conn);
+$terminalLockTimeout = posTerminalLockTimeoutMinutes($conn);
 
-// ---------- Terminal selection (sticky per session) ------------------
-if (isset($_GET['terminal'])) {
-    $picked = posGetTerminal($conn, (int)$_GET['terminal']);
-    if ($picked) { $_SESSION['pos_terminal_id'] = (int)$picked['id']; }
+// ---------- Terminal claim (POST, single-session lock, no live switch) --
+// A pick used to be a bare GET that just remembered an id in the
+// session - harmless when nothing else depended on it. Now that
+// selecting a till denies it to every other cashier, that side effect
+// makes it a mutation like any other on this app, so it is a real POST
+// with CSRF, not a GET.
+//
+// One cashier, one till, for the life of a login. There is deliberately
+// no "switch" here any more - a cashier who already holds a lock cannot
+// claim a different one from this handler at all, full stop. The only
+// way to move to another till is to log out (which releases the lock in
+// logout.php) and log back in. This is enforced here, not just left to
+// the header UI (which no longer offers a picker once a lock is held) -
+// a replayed or forged request must still be rejected server-side.
+$posClaimFlash = null;
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'select_terminal') {
+    $requestedTerminalId = (int)($_POST['terminal_id'] ?? 0);
+    $existingTerminalId = (int)($_SESSION['pos_terminal_id'] ?? 0);
+    $existingTerminal = $existingTerminalId ? posGetTerminal($conn, $existingTerminalId) : null;
+    $alreadyLocked = $existingTerminal && (int)($existingTerminal['locked_by_user_id'] ?? 0) === $cashierId;
+
+    if ($alreadyLocked && $existingTerminalId !== $requestedTerminalId) {
+        $_SESSION['pos_claim_flash'] = ['ok' => false,
+            'msg' => 'You are already checked into "' . $existingTerminal['name'] . '". Log out to use a different till.'];
+    } else {
+        [$claimOk, $claimMsg] = posClaimTerminal($conn, $requestedTerminalId, $cashierId, $cashierName, $terminalLockTimeout);
+        if ($claimOk) {
+            $_SESSION['pos_terminal_id'] = $requestedTerminalId;
+            // Separate, independent step - not part of the lock itself.
+            // Only ever touches sales THIS cashier orphaned themselves by
+            // logging out; a different cashier claiming this same till
+            // never inherits anyone else's orphaned sale.
+            posReclaimOwnOrphanedHeldSales($conn, $cashierId, $requestedTerminalId);
+        } else {
+            // inv_flash is never rendered on this page (it's an SPA, not a
+            // redirect-to-a-fresh-page flow) - carry the message through
+            // the PRG redirect in its own session key and toast it
+            // client-side once the page reloads.
+            $_SESSION['pos_claim_flash'] = ['ok' => false, 'msg' => $claimMsg];
+        }
+    }
     header('Location: pos.php'); exit;
 }
+if (isset($_SESSION['pos_claim_flash'])) {
+    $posClaimFlash = $_SESSION['pos_claim_flash'];
+    unset($_SESSION['pos_claim_flash']);
+}
+
+// ---------- Terminal resolution (server is the source of truth) ------
+// A terminal id sitting in the session proves nothing by itself - only
+// an actual, currently-held lock (re-checked on every load) lets this
+// cashier use it. No more auto-fallback to "the first active till":
+// with real session locking, picking one on the cashier's behalf could
+// hand them a till someone else is already mid-sale on.
 $terminalId = (int)($_SESSION['pos_terminal_id'] ?? 0);
 $terminal   = posGetTerminal($conn, $terminalId);
-if (!$terminal && $terminals) {
-    // Default to the first active till rather than making the cashier
-    // choose before they can serve anyone.
-    $terminal = $terminals[0];
-    $terminalId = (int)$terminal['id'];
-    $_SESSION['pos_terminal_id'] = $terminalId;
+if (!$terminal || (int)($terminal['locked_by_user_id'] ?? 0) !== $cashierId) {
+    $terminal = null;
+    $terminalId = 0;
+    unset($_SESSION['pos_terminal_id']);
 }
+// Blocks the till UI behind the "Select a Till" modal until a lock is
+// actually held - checked fresh above, never assumed from the session.
+$needsTerminalSelect = ($terminal === null);
 
 // A till pinned to a department opens on that department's stock. Two
 // values mean "open on everything" instead: no department at all, and
@@ -54,7 +104,7 @@ if (!$terminal && $terminals) {
 // Plumbing or Prescription Medicines - and a till assigned to one opens
 // on it. The cashier can switch with the department tabs either way, and
 // "All Departments" is always the first tab.
-$terminalDepartment = (string)($terminal['department'] ?? '');
+$terminalDepartment = $terminal ? (string)($terminal['department'] ?? '') : '';
 if ($terminalDepartment === catalogDefaultDepartmentKey()) { $terminalDepartment = ''; }
 $activeDepartment   = (string)($_GET['dept'] ?? $terminalDepartment);
 
@@ -78,11 +128,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         posFlash($ok ? 'success' : 'danger', $msg);
         header('Location: pos.php'); exit;
     }
-    if ($action === 'delete_held') {
-        posDeleteHeldSale($conn, (int)($_POST['held_id'] ?? 0));
-        posFlash('success', 'Held sale discarded.');
-        header('Location: pos.php'); exit;
-    }
+    // Discarding a held sale now always goes through
+    // api/pos-cancel-cart.php (mandatory reason + cancelled_carts audit
+    // row, written before the held sale is deleted) - there is
+    // deliberately no page-POST path left that can drop one silently.
 }
 
 // Stock nearing its expiry date, marked down automatically and shown on
@@ -97,7 +146,11 @@ $expiryDays    = retailExpiryDiscountDays($conn);
 // category filtering then happens client-side, so switching tabs is
 // instant and does not cost a round trip mid-queue.
 $products  = posGetProducts($conn);
-$heldSales = posGetHeldSales($conn);
+// Only this cashier's own held sales, on their own currently-locked
+// terminal - never another cashier's or another terminal's. Enforced
+// server-side in the query itself (posGetHeldSalesForCashier()), not
+// just by what this page chooses to render.
+$heldSales = posGetHeldSalesForCashier($conn, $cashierId, $terminalId);
 $taxRate   = posTaxRate($conn);
 // Only departments that are actually trading get a tab - a disabled one
 // would show an empty grid with no explanation.
@@ -231,15 +284,6 @@ $tillStmt->close();
             border: 1px solid rgba(255,255,255,.14);
         }
         .pos-top a.exit:hover { color: #fff; background: rgba(255,255,255,.08); }
-
-        .terminal-select {
-            width: auto; border-radius: 8px; font-size: .8125rem; height: 38px;
-            border: 1px solid rgba(255,255,255,.18);
-            background: rgba(255,255,255,.07); color: #fff;
-            padding: 0 30px 0 10px;
-        }
-        .terminal-select option { color: var(--pos-text); }
-        .terminal-select:focus { box-shadow: 0 0 0 3px rgba(15,154,168,.35); border-color: var(--pos-primary); outline: none; }
 
         /* ---- Scanner: the single most important control ------------- */
         .scan-wrap { position: relative; min-width: 260px; flex: 1; max-width: 460px; }
@@ -956,16 +1000,18 @@ $tillStmt->close();
             <span><?php echo htmlspecialchars(shopName($conn)); ?></span>
         </div>
 
-        <!-- Which till this is. Sticky per session. -->
-        <form method="get" class="d-flex align-items-center gap-1">
-            <select name="terminal" class="form-select form-select-sm terminal-select" onchange="this.form.submit()">
-                <?php foreach ($terminals as $t): ?>
-                <option value="<?php echo (int)$t['id']; ?>" <?php echo $terminalId === (int)$t['id'] ? 'selected' : ''; ?>>
-                    <?php echo htmlspecialchars($t['name'] . ' (' . $t['code'] . ')'); ?>
-                </option>
-                <?php endforeach; ?>
-            </select>
-        </form>
+        <!-- Which till this is - display only, on purpose. There is no
+             picker here any more: a cashier who already holds a lock
+             must never be able to browse or jump to another till mid-
+             session (that was the header's earlier failure mode - a
+             dropdown that doubled as a way to hop tills without logging
+             out). The till is chosen exactly once, in the blocking
+             modal below, right after login or after an admin/manager
+             force-release - never from this bar. -->
+        <div class="till" style="margin-right:4px;">
+            <i class="fas fa-cash-register me-1"></i>
+            <?php echo $terminal ? htmlspecialchars($terminal['name'] . ' (' . $terminal['code'] . ')') : 'No till selected'; ?>
+        </div>
 
         <div class="scan-wrap">
             <i class="fas fa-barcode"></i>
@@ -1132,7 +1178,16 @@ $tillStmt->close();
 
             <div id="custFields" style="display:none;padding:8px 14px;border-bottom:1px solid #eef1f4;">
                 <input type="text" id="custPhone" class="form-control form-control-sm mb-1" placeholder="Customer phone (identity)" style="border-radius:8px;">
-                <input type="text" id="custName" class="form-control form-control-sm" placeholder="Customer name" style="border-radius:8px;">
+                <input type="text" id="custName" class="form-control form-control-sm mb-1" placeholder="Customer name" style="border-radius:8px;">
+                <!-- Institutional customers (organisations, government entities) -
+                     printed on the receipt when filled in. Optional for everyone
+                     else, so a normal walk-in registered customer needs only the
+                     two fields above. -->
+                <input type="text" id="custAddress" class="form-control form-control-sm mb-1" placeholder="Address (optional)" style="border-radius:8px;">
+                <div class="d-flex gap-1">
+                    <input type="text" id="custTin" class="form-control form-control-sm" placeholder="TIN (optional)" style="border-radius:8px;">
+                    <input type="email" id="custEmail" class="form-control form-control-sm" placeholder="Email (optional)" style="border-radius:8px;">
+                </div>
             </div>
 
             <div class="cart-lines" id="cartLines">
@@ -1231,10 +1286,16 @@ $tillStmt->close();
             <div class="modal-header"><h5 class="modal-title"><i class="fas fa-pause me-2"></i>Held Sales</h5>
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
             <div class="modal-body">
+                <?php if (!$heldSales): ?>
+                <p class="text-muted mb-0">No held sales on this till right now.</p>
+                <?php endif; ?>
                 <?php foreach ($heldSales as $h): ?>
                 <div class="d-flex justify-content-between align-items-center border-bottom py-2">
                     <div>
                         <strong><?php echo htmlspecialchars($h['label']); ?></strong>
+                        <?php if ($h['status'] === 'stale'): ?>
+                            <span class="badge bg-warning text-dark ms-1">Ageing</span>
+                        <?php endif; ?>
                         <div class="text-muted" style="font-size:.78rem;">
                             <?php echo (int)$h['item_count']; ?> item(s) &middot; Tsh <?php echo number_format((float)$h['total_estimate']); ?>
                             &middot; <?php echo htmlspecialchars($h['cashier_name'] ?? ''); ?>
@@ -1243,19 +1304,151 @@ $tillStmt->close();
                     </div>
                     <div class="d-flex gap-1">
                         <button class="btn btn-sm btn-success" style="border-radius:8px;"
-                                onclick='resumeHeld(<?php echo (int)$h["id"]; ?>, <?php echo json_encode($h["cart_json"], JSON_HEX_APOS | JSON_HEX_QUOT); ?>)'>
+                                onclick='resumeHeld(<?php echo (int)$h["id"]; ?>)'>
                             Resume
                         </button>
-                        <form method="post" onsubmit="return confirm('Discard this held sale?');">
-<?php echo csrfField(); ?>
-                            <input type="hidden" name="action" value="delete_held">
-                            <input type="hidden" name="held_id" value="<?php echo (int)$h['id']; ?>">
-                            <button class="btn btn-sm btn-outline-danger" style="border-radius:8px;"><i class="fas fa-trash"></i></button>
-                        </form>
+                        <button type="button" class="btn btn-sm btn-outline-danger" style="border-radius:8px;"
+                                onclick='openCancelModal("held_sale", <?php echo (int)$h["id"]; ?>, <?php echo json_encode($h["cart_json"], JSON_HEX_APOS | JSON_HEX_QUOT); ?>, <?php echo (float)$h["total_estimate"]; ?>)'>
+                            <i class="fas fa-trash"></i>
+                        </button>
                     </div>
                 </div>
                 <?php endforeach; ?>
             </div>
+        </div>
+    </div>
+</div>
+
+<!-- ============ Cancel cart / discard held sale - mandatory reason ============
+     One shared modal for every way a cart can be discarded without becoming
+     a sale: the Clear Cart button, the last line item being removed, and
+     discarding a held sale. Every path writes a cancelled_carts row via
+     api/pos-cancel-cart.php before anything actually disappears. -->
+<div class="modal fade" id="cancelCartModal" tabindex="-1">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content" style="border-radius:14px;">
+            <form id="cancelCartForm">
+                <div class="modal-header">
+                    <h5 class="modal-title"><i class="fas fa-triangle-exclamation me-2" style="color:#c0392b;"></i>Cancel this cart?</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <p class="small text-muted mb-2">This is recorded for the shop's records. A reason is required.</p>
+                    <label class="form-label">Reason</label>
+                    <select id="cancelReasonCode" class="form-select mb-2" style="border-radius:8px;" required>
+                        <option value="">Choose a reason&hellip;</option>
+                        <option value="customer_changed_mind">Customer changed mind</option>
+                        <option value="wrong_items_scanned">Wrong items scanned</option>
+                        <option value="price_dispute">Price dispute</option>
+                        <option value="customer_left">Customer left</option>
+                        <option value="duplicate_test_scan">Duplicate / test scan</option>
+                        <option value="other">Other</option>
+                    </select>
+                    <input type="text" id="cancelReasonDetail" class="form-control" style="border-radius:8px;display:none;"
+                           placeholder="Please describe the reason" maxlength="255">
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Keep cart</button>
+                    <button type="submit" class="btn btn-danger" style="border-radius:10px;">Confirm cancellation</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- ============ Select a till - blocking until a lock is actually held ============ -->
+<!-- Server is the source of truth: $needsTerminalSelect was computed
+     above from a fresh read of pos_terminals, not from anything the
+     session merely remembers. Static backdrop + no keyboard-dismiss,
+     same as restoreCartModal below - there is no "cancel" on this one,
+     because there is no till UI to fall back to without a lock. -->
+<div class="modal fade" id="selectTillModal" tabindex="-1" data-bs-backdrop="static" data-bs-keyboard="false">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content" style="border-radius:14px;">
+            <div class="modal-header">
+                <h5 class="modal-title"><i class="fas fa-cash-register me-2"></i>Select a till</h5>
+            </div>
+            <div class="modal-body">
+                <?php if (!$terminals): ?>
+                <p class="text-muted mb-0">No tills are set up yet. Ask an admin or manager to add one under Tills / Terminals.</p>
+                <?php else: ?>
+                <?php foreach ($terminals as $t):
+                    $mState = posTerminalLockState($t, $terminalLockTimeout);
+                    $mLockedByMe = (int)($t['locked_by_user_id'] ?? 0) === $cashierId;
+                    if ($mState === 'active' && $mLockedByMe) { $mState = 'free'; } // this is already ours
+                    $mBadge = ['free' => 'bg-success', 'stale' => 'bg-warning text-dark', 'active' => 'bg-secondary'][$mState];
+                    $mBadgeText = ['free' => 'Available', 'stale' => 'Stale - reclaimable', 'active' => 'In use'][$mState];
+                    $mButtonText = ($mState === 'stale') ? 'Reclaim' : 'Select';
+                ?>
+                <form method="post" class="d-flex align-items-center justify-content-between border rounded p-2 mb-2">
+                    <?php echo csrfField(); ?>
+                    <input type="hidden" name="action" value="select_terminal">
+                    <input type="hidden" name="terminal_id" value="<?php echo (int)$t['id']; ?>">
+                    <div>
+                        <div class="fw-semibold"><?php echo htmlspecialchars($t['name'] . ' (' . $t['code'] . ')'); ?></div>
+                        <div class="small text-muted">
+                            <span class="badge <?php echo $mBadge; ?>"><?php echo $mBadgeText; ?></span>
+                            <?php if ($mState !== 'free'): ?>
+                                <?php echo htmlspecialchars($t['locked_by_username'] ?? ''); ?>
+                                &middot; last active <?php echo htmlspecialchars($t['last_activity_at'] ? date('H:i', strtotime($t['last_activity_at'])) : '-'); ?>
+                            <?php endif; ?>
+                        </div>
+                    </div>
+                    <button type="submit" class="btn btn-sm <?php echo $mState === 'active' ? 'btn-outline-secondary' : 'btn-primary'; ?>" <?php echo $mState === 'active' ? 'disabled' : ''; ?>>
+                        <?php echo $mButtonText; ?>
+                    </button>
+                </form>
+                <?php endforeach; ?>
+                <?php endif; ?>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ============ Restore a cart found from before an unexpected reload ============ -->
+<div class="modal fade" id="restoreCartModal" tabindex="-1" data-bs-backdrop="static" data-bs-keyboard="false">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content" style="border-radius:14px;">
+            <div class="modal-header">
+                <h5 class="modal-title"><i class="fas fa-clock-rotate-left me-2"></i>Restore your previous cart?</h5>
+            </div>
+            <div class="modal-body">
+                <p id="restoreCartSummary" class="mb-0"></p>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-danger" id="restoreCartDiscardBtn">No, discard it</button>
+                <button type="button" class="btn btn-success" id="restoreCartYesBtn">Yes, restore it</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ============ Hold sale - label prompt (was a native prompt()) ============
+     A native prompt() blocks the whole tab - no toast, no other modal,
+     nothing - until it's dismissed, which is exactly the kind of thing
+     this app avoids everywhere else (see cancelCartModal, restoreCartModal
+     above). Same visual pattern as those. -->
+<div class="modal fade" id="holdLabelModal" tabindex="-1">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content" style="border-radius:14px;">
+            <form id="holdLabelForm">
+                <div class="modal-header">
+                    <h5 class="modal-title"><i class="fas fa-pause me-2" style="color:var(--pos-primary);"></i>Hold this sale</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <label class="form-label" for="holdLabelInput">Label</label>
+                    <input type="text" id="holdLabelInput" class="form-control" style="border-radius:8px;"
+                           maxlength="60" placeholder="e.g. customer name" autocomplete="off">
+                    <div class="form-text">Helps you find it again in the Held Sales list.</div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" class="btn btn-success" style="border-radius:10px;">
+                        <i class="fas fa-pause me-1"></i>Hold sale
+                    </button>
+                </div>
+            </form>
         </div>
     </div>
 </div>
@@ -1442,6 +1635,9 @@ $tillStmt->close();
 })();
 
 const CSRF_TOKEN = <?php echo json_encode(csrfToken()); ?>;
+const NEEDS_TERMINAL_SELECT = <?php echo $needsTerminalSelect ? 'true' : 'false'; ?>;
+const TERMINAL_CLAIM_FLASH = <?php echo json_encode($posClaimFlash); ?>;
+const POS_HEARTBEAT_INTERVAL_MS = 45000; // matches CLAUDE.md-documented 45s cadence, one constant, one place
 const TAX_RATE = <?php echo json_encode($taxRate); ?>;
 const TAX_INCLUSIVE = <?php echo posTaxInclusive($conn) ? 'true' : 'false'; ?>;
 let cart = [];          // [{id, name, price, qty, stock}]
@@ -1508,7 +1704,20 @@ function addToCart(id, name, price, stock, qty = 1) {
 function setQty(id, qty) {
     const line = cart.find(l => l.id === id);
     if (!line) return;
-    if (qty <= 0) { cart = cart.filter(l => l.id !== id); }
+    if (qty <= 0) {
+        // Removing the LAST line empties the cart, same as Clear Cart -
+        // require the same reason before anything actually changes.
+        // Removing one of several lines needs no prompt; the cart itself
+        // isn't being discarded.
+        if (cart.length === 1) {
+            openCancelModal('live_cart', null, cart, totals().grand, () => {
+                cart = cart.filter(l => l.id !== id);
+                renderCart();
+            });
+            return;
+        }
+        cart = cart.filter(l => l.id !== id);
+    }
     else if (qty > line.stock) { beep(false); toast('Only ' + line.stock + ' in stock.', false); return; }
     else { line.qty = qty; }
     renderCart();
@@ -1519,10 +1728,218 @@ function clearCart(silent) {
     resumedHeldId = 0;
     document.getElementById('discInput').value = 0;
     clearPayments();
+    clearCartShadow();
     renderCart();
     if (!silent) toast('Cart cleared.');
     focusScanner();
 }
+
+/* ---------------------------------------------------------------
+   CANCEL / DISCARD - mandatory reason, shared by the Clear Cart
+   button, the last line item being removed (see setQty()), and
+   discarding a held sale. Nothing actually disappears until
+   api/pos-cancel-cart.php confirms the audit row was written.
+   --------------------------------------------------------------- */
+let cancelCtx = null;
+
+function openCancelModal(source, heldSaleId, items, total, onConfirmed) {
+    // Held-sale items arrive as a JSON STRING (same shape resumeHeld()
+    // already unpacks); the live cart passes the real array directly.
+    let parsedItems = items;
+    if (typeof items === 'string') {
+        try { parsedItems = JSON.parse(items) || []; } catch (e) { parsedItems = []; }
+    }
+    cancelCtx = { source, heldSaleId: heldSaleId || null, items: parsedItems || [], total: total || 0, onConfirmed: onConfirmed || null };
+    document.getElementById('cancelReasonCode').value = '';
+    document.getElementById('cancelReasonDetail').value = '';
+    document.getElementById('cancelReasonDetail').style.display = 'none';
+    bootstrap.Modal.getOrCreateInstance(document.getElementById('cancelCartModal')).show();
+}
+
+document.getElementById('cancelReasonCode').addEventListener('change', function () {
+    document.getElementById('cancelReasonDetail').style.display = this.value === 'other' ? 'block' : 'none';
+});
+
+document.getElementById('cancelCartForm').addEventListener('submit', function (e) {
+    e.preventDefault();
+    if (!cancelCtx) return;
+    const reasonCode = document.getElementById('cancelReasonCode').value;
+    const reasonDetail = document.getElementById('cancelReasonDetail').value.trim();
+    if (!reasonCode) { toast('Choose a reason.', false); return; }
+    if (reasonCode === 'other' && !reasonDetail) { toast('Enter a reason.', false); return; }
+
+    fetch('api/pos-cancel-cart.php', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF_TOKEN },
+        body: JSON.stringify({
+            source: cancelCtx.source,
+            held_sale_id: cancelCtx.heldSaleId,
+            items: cancelCtx.items,
+            total: cancelCtx.total,
+            reason_code: reasonCode,
+            reason_detail: reasonDetail,
+            terminal_id: <?php echo (int)$terminalId; ?>
+        })
+    })
+    .then(r => r.json())
+    .then(d => {
+        bootstrap.Modal.getInstance(document.getElementById('cancelCartModal'))?.hide();
+        if (!d.ok) { toast(d.message || 'Could not record the cancellation.', false); return; }
+        const ctx = cancelCtx;
+        cancelCtx = null;
+        if (ctx.source === 'held_sale') {
+            toast('Held sale discarded.');
+            location.reload();
+            return;
+        }
+        if (ctx.onConfirmed) { ctx.onConfirmed(); } else { clearCart(true); }
+        toast('Cart cancelled.');
+    })
+    .catch(() => { toast('Network error - nothing was changed.', false); });
+});
+
+/* ---------------------------------------------------------------
+   CART PERSISTENCE (this browser only)
+   ---------------------------------------------------------------
+   A same-device safety net for an accidental refresh or crash,
+   layered on top of - not replacing - the server-side Hold Sale
+   mechanism (which is still how a cashier deliberately parks a sale
+   to serve someone else, and survives a different device/terminal).
+   Nothing here is sent anywhere until checkout or an explicit hold.
+   --------------------------------------------------------------- */
+const CART_SHADOW_KEY = 'mxPosCartShadow_<?php echo (int)$terminalId; ?>';
+let shadowSaveTimer = null;
+
+function saveCartShadow() {
+    clearTimeout(shadowSaveTimer);
+    shadowSaveTimer = setTimeout(function () {
+        try {
+            if (!cart.length) { localStorage.removeItem(CART_SHADOW_KEY); return; }
+            localStorage.setItem(CART_SHADOW_KEY, JSON.stringify({
+                cart: cart,
+                discount: document.getElementById('discInput').value,
+                resumedHeldId: resumedHeldId,
+                custType: document.getElementById('custType').value,
+                custName: document.getElementById('custName').value,
+                custPhone: document.getElementById('custPhone').value,
+                custAddress: document.getElementById('custAddress').value,
+                custTin: document.getElementById('custTin').value,
+                custEmail: document.getElementById('custEmail').value,
+                savedAt: Date.now()
+            }));
+        } catch (e) {}
+    }, 250);
+}
+
+function clearCartShadow() {
+    // Cancel any debounced save still in flight too - otherwise it can
+    // fire moments after this "clear" and silently rewrite the very
+    // shadow this call was meant to remove (the hold/cancel/checkout
+    // paths that call this all expect the clear to be final).
+    clearTimeout(shadowSaveTimer);
+    try { localStorage.removeItem(CART_SHADOW_KEY); } catch (e) {}
+}
+
+// Offer to restore a shadow copy left behind by an accidental
+// refresh/crash. A cart older than one shift is stale, not a recovery
+// candidate, so it's silently dropped rather than offered back.
+(function checkCartShadow() {
+    let shadow = null;
+    try { shadow = JSON.parse(localStorage.getItem(CART_SHADOW_KEY)); } catch (e) { shadow = null; }
+    if (!shadow || !Array.isArray(shadow.cart) || !shadow.cart.length) return;
+    if (Date.now() - (shadow.savedAt || 0) > 12 * 60 * 60 * 1000) { clearCartShadow(); return; }
+
+    document.getElementById('restoreCartSummary').textContent =
+        shadow.cart.length + ' item(s), ' + money(shadow.cart.reduce((s, l) => s + l.price * l.qty, 0)) +
+        ' - left behind by an interrupted session.';
+    const modalEl = document.getElementById('restoreCartModal');
+    const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+
+    document.getElementById('restoreCartYesBtn').onclick = function () {
+        cart = shadow.cart;
+        resumedHeldId = shadow.resumedHeldId || 0;
+        document.getElementById('discInput').value = shadow.discount || 0;
+        if (shadow.custType) {
+            document.getElementById('custType').value = shadow.custType;
+            document.getElementById('custFields').style.display = shadow.custType === 'registered' ? 'block' : 'none';
+        }
+        document.getElementById('custName').value = shadow.custName || '';
+        document.getElementById('custPhone').value = shadow.custPhone || '';
+        document.getElementById('custAddress').value = shadow.custAddress || '';
+        document.getElementById('custTin').value = shadow.custTin || '';
+        document.getElementById('custEmail').value = shadow.custEmail || '';
+        renderCart();
+        modal.hide();
+        toast('Cart restored.');
+    };
+    document.getElementById('restoreCartDiscardBtn').onclick = function () {
+        // Discarding it is a cancellation like any other - it goes
+        // through the same audited path, never a silent localStorage clear.
+        clearCartShadow();
+        modal.hide();
+        openCancelModal('live_cart', null, shadow.cart,
+            shadow.cart.reduce((s, l) => s + l.price * l.qty, 0), null);
+    };
+    modal.show();
+})();
+
+// ---------------------------------------------------------------
+// Terminal session lock - blocking modal + heartbeat
+// ---------------------------------------------------------------
+// The server already decided (fresh, on this page load) whether this
+// cashier actually holds a lock on the till in their session. If not,
+// force the picker open - static backdrop, no close button, same as
+// restoreCartModal above - there is nothing behind it to interact with
+// until a till is claimed via a real POST + page reload.
+if (NEEDS_TERMINAL_SELECT) {
+    bootstrap.Modal.getOrCreateInstance(document.getElementById('selectTillModal')).show();
+}
+if (TERMINAL_CLAIM_FLASH) {
+    toast(TERMINAL_CLAIM_FLASH.msg, TERMINAL_CLAIM_FLASH.ok);
+}
+
+// While a lock IS held, prove this session is still alive every 45s so
+// another cashier's claim on the same till correctly sees it as active,
+// not stale. If the server ever says we no longer own it (force-released
+// by a manager, or reclaimed as stale after a long gap), stop pinging
+// and reopen the picker - the cart itself is just a JS variable and is
+// already protected by the shadow-copy above, so nothing is lost.
+let terminalHeartbeatTimer = null;
+function startTerminalHeartbeat() {
+    if (NEEDS_TERMINAL_SELECT || terminalHeartbeatTimer) return;
+    terminalHeartbeatTimer = setInterval(function () {
+        fetch('api/pos-terminal-heartbeat.php', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'X-CSRF-Token': CSRF_TOKEN }
+        })
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+            if (!d.ok) {
+                clearInterval(terminalHeartbeatTimer);
+                terminalHeartbeatTimer = null;
+                toast('This till is no longer assigned to you - select a till to continue.', false);
+                bootstrap.Modal.getOrCreateInstance(document.getElementById('selectTillModal')).show();
+            }
+        })
+        .catch(function () { /* transient network error - the next heartbeat retries */ });
+    }, POS_HEARTBEAT_INTERVAL_MS);
+}
+startTerminalHeartbeat();
+
+// Warn before leaving with a sale in progress. Modern browsers show
+// their own generic confirmation and ignore any custom message - setting
+// returnValue is what triggers it, the text itself is never shown. F5 /
+// Ctrl+R cannot be reliably intercepted in any browser, so no attempt is
+// made to block them; the shadow-copy above is what actually protects
+// the sale, not this dialog.
+window.addEventListener('beforeunload', function (e) {
+    if (cart.length > 0) {
+        e.preventDefault();
+        e.returnValue = '';
+    }
+});
 
 /* ---------------------------------------------------------------
    PAYMENT
@@ -1614,6 +2031,7 @@ function renderCart() {
     document.getElementById('tGrand').textContent = money(t.grand);
     updateChange();
     document.getElementById('completeBtn').disabled = cart.length === 0;
+    saveCartShadow();
 }
 
 function updateChange() {
@@ -1856,31 +2274,89 @@ document.getElementById('custType').addEventListener('change', function() {
     document.getElementById('custFields').style.display = this.value === 'registered' ? 'block' : 'none';
 });
 
+// Look an existing registered customer up by phone and autofill their
+// stored details - still editable afterward, so typing over an
+// autofilled field (e.g. a new TIN) is what updates the stored record
+// at checkout. Never overwrites what the cashier has already typed.
+document.getElementById('custPhone').addEventListener('blur', function() {
+    const phone = this.value.trim();
+    if (!phone) return;
+    fetch('api/customer-lookup.php?phone=' + encodeURIComponent(phone), { credentials: 'same-origin' })
+        .then(r => r.json())
+        .then(d => {
+            if (!d.ok || !d.found) return;
+            const c = d.customer;
+            const fill = (id, val) => { const el = document.getElementById(id); if (el && !el.value && val) el.value = val; };
+            fill('custName', c.name);
+            fill('custAddress', c.address);
+            fill('custTin', c.tin);
+            fill('custEmail', c.email);
+        })
+        .catch(() => {});
+});
+
 // ---------------------------------------------------------------
 // Hold / clear / complete
 // ---------------------------------------------------------------
 document.getElementById('clearBtn').addEventListener('click', () => {
     if (!cart.length) return;
-    if (confirm('Clear the whole cart?')) clearCart();
+    openCancelModal('live_cart', null, cart, totals().grand, null);
 });
 
 document.getElementById('holdBtn').addEventListener('click', () => {
     if (!cart.length) { toast('Nothing to hold.', false); return; }
-    const label = prompt('Label for this held sale (e.g. customer name):', 'Held ' + new Date().toTimeString().slice(0, 5));
-    if (label === null) return;
+    document.getElementById('holdLabelInput').value = 'Held ' + new Date().toTimeString().slice(0, 5);
+    bootstrap.Modal.getOrCreateInstance(document.getElementById('holdLabelModal')).show();
+});
+
+// Pre-select the default label so typing a name replaces it outright,
+// same as a native prompt()'s pre-filled text would have.
+document.getElementById('holdLabelModal').addEventListener('shown.bs.modal', () => {
+    const input = document.getElementById('holdLabelInput');
+    input.focus();
+    input.select();
+});
+
+document.getElementById('holdLabelForm').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const label = document.getElementById('holdLabelInput').value.trim() || ('Held ' + new Date().toTimeString().slice(0, 5));
+    bootstrap.Modal.getInstance(document.getElementById('holdLabelModal'))?.hide();
+    // The cart is about to be parked server-side in pos_held_sales -
+    // that IS the safe copy now, so the same-device shadow copy would
+    // otherwise still be sitting in localStorage when this form's POST
+    // reloads the page, and checkCartShadow() would then mistake a sale
+    // that was just deliberately held for one abandoned by a crash,
+    // prompting "Restore your previous cart?" right after holding it.
+    clearCartShadow();
     document.getElementById('holdCartJson').value = JSON.stringify(cart);
     document.getElementById('holdLabel').value = label;
     document.getElementById('holdTotal').value = totals().grand;
     document.getElementById('holdForm').submit();
 });
 
-function resumeHeld(id, json) {
-    try { cart = JSON.parse(json) || []; } catch (e) { cart = []; }
-    resumedHeldId = id;
-    renderCart();
-    bootstrap.Modal.getInstance(document.getElementById('heldModal'))?.hide();
-    toast('Held sale resumed.');
-    focusScanner();
+function resumeHeld(id) {
+    // Goes through the server every time - it is the ownership +
+    // concurrency gate (posResumeHeldSale()), not a formality. The held
+    // sale's own cart_json is never embedded in this page; it only ever
+    // arrives here, after the server has confirmed this cashier actually
+    // owns it on this exact till.
+    fetch('api/pos-resume-held.php', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF_TOKEN },
+        body: JSON.stringify({ held_sale_id: id })
+    })
+    .then(r => r.json())
+    .then(d => {
+        if (!d.ok) { beep(false); toast(d.message || 'Could not resume that held sale.', false); return; }
+        cart = Array.isArray(d.cart) ? d.cart : [];
+        resumedHeldId = id;
+        renderCart();
+        bootstrap.Modal.getInstance(document.getElementById('heldModal'))?.hide();
+        toast('Held sale resumed.');
+        focusScanner();
+    })
+    .catch(() => { beep(false); toast('Network error - could not resume that held sale.', false); });
 }
 
 let checkingOut = false;
@@ -1926,7 +2402,10 @@ document.getElementById('completeBtn').addEventListener('click', () => {
             customer: {
                 type: document.getElementById('custType').value,
                 name: document.getElementById('custName').value,
-                phone: document.getElementById('custPhone').value
+                phone: document.getElementById('custPhone').value,
+                address: document.getElementById('custAddress').value,
+                tin: document.getElementById('custTin').value,
+                email: document.getElementById('custEmail').value
             }
         })
     })
@@ -1950,6 +2429,9 @@ document.getElementById('completeBtn').addEventListener('click', () => {
         document.getElementById('custFields').style.display = 'none';
         document.getElementById('custName').value = '';
         document.getElementById('custPhone').value = '';
+        document.getElementById('custAddress').value = '';
+        document.getElementById('custTin').value = '';
+        document.getElementById('custEmail').value = '';
         // Refresh stock badges after a short pause so the next sale sees
         // accurate numbers.
         setTimeout(() => location.reload(), 1500);

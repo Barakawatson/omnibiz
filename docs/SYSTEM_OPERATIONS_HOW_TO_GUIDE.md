@@ -623,7 +623,7 @@ If the number is known, the sale is linked to that customer. If not, a customer 
 2. Click **Add user**.
 3. Enter a **username**.
 4. Enter a **password** — at least **6 characters**.
-5. Choose the **role**: Administrator, Manager, Storekeeper or Cashier.
+5. Choose the **role**: Administrator, Manager, Accountant, Storekeeper or Cashier.
 6. Save.
 7. Give the person their password and tell them to change it on their Profile.
 
@@ -909,32 +909,35 @@ There is no automatic rotation. Archive and truncate them when they get large.
 
 ## Cashier
 
-**Can do:** use the POS Terminal, view Sales & Receipts, reprint receipts, view and add customers.
+**Can do:** use the POS Terminal, view your own Sales & Receipts, reprint your own receipts, raise a Stock Request, see Expiring Soon.
 
-**Cannot do:** void a sale, see inventory, see products, see purchasing, see any accounting, manage users, run reports.
+**Cannot do:** void a sale, see or manage customers as a separate screen (phone lookup at checkout still works), see inventory, see products, see purchasing, see any accounting, manage users, run reports, switch tills without logging out, see or touch another cashier's held sales.
 
 ### Daily tasks
 
 **Start of shift**
-1. Log in — you land on the POS Terminal.
-2. Check the terminal name in the top bar is your till.
-3. Check the scanner: scan any product and confirm it beeps and adds.
-4. Confirm the cash float in your drawer with your supervisor.
+1. Log in.
+2. *(25 Aug 2026)* You're shown **Select a Till** — pick your terminal from the list of currently-available ones. This is now enforced by the server: two cashiers cannot hold the same till, and you cannot proceed to the checkout screen without picking one.
+3. The till name now shown in the top bar is locked to you for this login — there is no picker to switch it. To use a *different* till, log out and log back in.
+4. Check the scanner: scan any product and confirm it beeps and adds.
+5. Confirm the cash float in your drawer with your supervisor.
 
 **During the shift**
-5. Serve customers — [How to make a sale](#4-how-to-make-a-sale).
-6. Hold a sale when a customer steps away; resume it when they return.
-7. Attach a customer's name and phone when they ask for it.
-8. Take payment in cash, Lipa Namba, bank or card — including combinations.
-9. Reprint a receipt if a customer asks.
-10. Tell your supervisor immediately if a barcode does not scan or stock looks wrong.
+6. Serve customers — [How to make a sale](#4-how-to-make-a-sale).
+7. Hold a sale when a customer steps away (type a label in the dialog that appears); resume it when they return. You only ever see **your own** held sales on **your own** till — never another cashier's.
+8. Attach a customer's name and phone when they ask for it.
+9. Take payment in cash, Lipa Namba, bank or card — including combinations.
+10. Reprint a receipt if a customer asks (your own sales only).
+11. Tell your supervisor immediately if a barcode does not scan or stock looks wrong.
 
 **End of shift**
-11. Complete or discard any held sales.
-12. Count your drawer and hand over to your supervisor or the manager.
-13. Log out.
+12. Complete or discard any held sales if you can — but you don't have to: *(25 Aug 2026)* if you log out with sales still held, they are **not deleted**. They wait for you (or, if a manager reassigns them, another actively logged-in cashier) rather than disappearing or silently passing to whoever logs into your till next.
+13. Count your drawer and hand over to your supervisor or the manager.
+14. Log out. This immediately frees your till for the next cashier.
 
-**Things you cannot fix yourself:** voiding a sale, an unrecognised barcode, adjusting stock, changing a price. Ask a supervisor.
+**Coming back after a break or the next day:** log back in and pick a till as usual. Any sales you held before logging out come back to your list automatically, on whichever till you pick this time — you don't need to remember which till you were on before.
+
+**Things you cannot fix yourself:** voiding a sale, an unrecognised barcode, adjusting stock, changing a price, recovering a held sale that's gone past 2 hours (**expired**) or that belongs to a shift that's already ended for good. Ask a supervisor — they can review and recover it on **Held Sales Review**.
 
 ---
 
@@ -973,9 +976,35 @@ There is no automatic rotation. Archive and truncate them when they get large.
 
 ---
 
+## Accountant
+
+*New role, added 25 August 2026.*
+
+**Can do:** the books, full stop — Chart of Accounts, General Ledger (post and reverse manual journal entries), Expenses, Profit & Loss, the daily close history, plus read-only Sales Reports to reconcile revenue against what was posted.
+
+**Cannot do:** open the POS Terminal, see or touch inventory, approve or pay a purchase order, manage tills, manage users, see the operational (own-till) sales list a cashier uses — sales are read through the Sales Reports group instead.
+
+### Daily tasks
+
+**Start of day**
+1. Log in — you land on the Finance overview.
+2. Check for any **Days Awaiting Close** and follow up with whoever closes the till (a manager or administrator — closing the day itself is not an accountant task).
+
+**During the day**
+3. Post or reverse journal entries as needed — always by reversal, never by editing an existing entry.
+4. Record and categorise expenses as they're paid.
+5. Reconcile Sales Reports against what's posted to the ledger.
+
+**Weekly / monthly**
+6. Review the Profit & Loss.
+7. Review the Chart of Accounts for anything that needs reorganising.
+8. Run the stock-value invariant check (or ask a technician to) if something looks off between inventory and the ledger.
+
+---
+
 ## Manager
 
-**Can do:** everything a cashier and storekeeper can, plus Manager Overview, the Dashboard, voiding sales, all accounting reports and the daily close, expenses, and user management.
+**Can do:** everything a cashier and storekeeper can, plus Manager Overview, the Dashboard, voiding sales, all accounting reports and the daily close, expenses, user management, managing tills/terminals (including force-releasing a stuck one), and reviewing/recovering orphaned or expired held sales.
 
 **Cannot do:** open the Chart of Accounts, post or reverse journal entries, disable departments.
 
@@ -994,6 +1023,8 @@ There is no automatic rotation. Archive and truncate them when they get large.
 8. Record expenses as they are paid.
 9. Watch takings and gross profit against expectation.
 10. Handle anything cashiers or storekeepers escalate.
+10a. *(25 Aug 2026)* Check **Held Sales Review** for anything **Needs attention** — an orphaned sale (a cashier logged out while it was held) or one that's expired from inactivity. Recover it to whichever cashier is actively on shift right now, with a reason — the full workflow history is shown right there before you decide.
+10b. If a till is stuck showing **In use** with nobody actually on it, **Force Release** it on **Tills / Terminals**.
 
 **End of day**
 11. **Close the day (Z-Report)** — [procedure](#how-to-close-the-day-z-report). This is the day's most important task.
@@ -1157,7 +1188,11 @@ There is no automatic rotation. Archive and truncate them when they get large.
 | **"A product in the cart is no longer available."** | It was withdrawn while the cart was open | Remove that line and complete the rest. |
 | Receipt window did not open | Browser blocked the pop-up | Allow pop-ups for the site. The sale is saved — reprint from Sales & Receipts. |
 | Receipt prints badly | Wrong printer or paper setup | The layout is for an 80 mm thermal printer. Check paper width and page setup. |
-| Held sale missing | It was discarded or already completed | Held sales are removed automatically once their sale completes. |
+| Held sale missing from my list | It was discarded, completed, or you logged out with it still held | *(25 Aug 2026)* Held sales are never deleted, but a status change removes them from your active list. If you logged out while it was held, it is now **orphaned** — log back in and claim a till and it comes back to you automatically. If someone else needs it, ask a manager/admin to recover it on **Held Sales Review**. |
+| Held sale disappeared after sitting for a long time | It expired from inactivity | *(25 Aug 2026)* After ~2 hours untouched (configurable) a held sale is marked **expired** and drops out of the active list, but is never deleted. Ask a manager/admin to recover it on **Held Sales Review**. |
+| **"Select a Till"** appears again mid-shift | Your till lock went stale (no heartbeat — network drop, laptop sleep) or a manager force-released it | Pick a till again. Your cart-in-progress is unaffected; any *held* sales are safe regardless. |
+| **"You are already checked into 'X'. Log out to use a different till."** | You tried to pick a different till while still holding one | *(25 Aug 2026, by design)* A cashier can only be on one till per login. Log out, then log back in and pick the other till. |
+| A till shows **"In use by X"** and can't be selected | Someone is actively logged into it | Wait for them to log out, or ask a manager/admin to **Force Release** it on **Tills / Terminals** if it's genuinely stuck. |
 | Till feels slow | Very large catalogue | The till loads every product at once. Nothing to configure — raise it with a technician. |
 
 ## Inventory
@@ -1211,7 +1246,7 @@ There is no automatic rotation. Archive and truncate them when they get large.
 | **"Incorrect username or password."** | Wrong credentials | Check both — passwords are case-sensitive. Ask an administrator to reset it; there is no self-service reset. |
 | **"Please enter both your username and password."** | A box was blank | Fill in both. |
 | **"This account has been deactivated…"** | Account set inactive | An administrator must reactivate it in Manage Users. |
-| **"Your account role is not valid for this system…"** | A legacy role | An administrator must set one of the four current roles. |
+| **"Your account role is not valid for this system…"** | A legacy role | An administrator must set one of the five current roles (Administrator, Manager, Accountant, Storekeeper, Cashier). |
 | **Access denied** page | Your role cannot use that page | Navigate from the sidebar. Ask an administrator if you genuinely need access. |
 | Sent back to login repeatedly | Session expired, or cookies blocked | Enable cookies and sign in again. |
 | Everyone signed out at once, right after the system was updated | Expected, once only — the 13 August 2026 update renamed the sign-in cookie so other software on the same PC cannot interfere with it | Sign in again. It does not repeat. |

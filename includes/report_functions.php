@@ -80,7 +80,13 @@ function reportCatalogue(): array {
         'sales' => [
             'label' => 'Sales', 'icon' => 'fa-cart-shopping', 'accent' => 'sales',
             'blurb' => 'What sold, who sold it and how it was paid for.',
-            'module' => 'pos_sales',
+            // 'sales_reports', not 'pos_sales' - the latter is the
+            // operational, own-till-only sales list a cashier legitimately
+            // needs; this shop-wide report group (every cashier compared,
+            // every terminal, full searchable history) is a supervisor/
+            // accounting view and must not follow along just because
+            // someone holds the till-scoped key.
+            'module' => 'sales_reports',
             'reports' => [
                 ['summary',       'Sales summary',      'Totals, discounts, tax and profit for a period, day by day.'],
                 ['by_product',    'Sales by product',   'Units and revenue per product, best first.'],
@@ -127,6 +133,18 @@ function reportCatalogue(): array {
                 ['journal',        'Journal',         'Entries in the order they were posted.'],
                 ['expenses',       'Expenses',        'Money out, by account and payee.'],
                 ['daily_close',    'Daily close history', 'Z-report closes, with each day\'s variance.'],
+            ],
+        ],
+        // Supervisor oversight of staff (admin/manager only - never
+        // cashier or storekeeper), not an operational report -
+        // deliberately its own group so its module key ('fraud_audit')
+        // can be gated independently of the other groups here.
+        'audit' => [
+            'label' => 'Audit', 'icon' => 'fa-shield-halved', 'accent' => 'account',
+            'blurb' => 'Oversight of staff actions that never became a sale.',
+            'module' => 'fraud_audit',
+            'reports' => [
+                ['cancelled_carts', 'Cancelled carts', 'Every cart or held sale discarded, with the reason given.'],
             ],
         ],
     ];

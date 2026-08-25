@@ -8,7 +8,11 @@
 // Every change is written through the shared audit trail.
 // ============================================================
 require_once '../includes/auth.php';
-requireModule('inventory');
+// 'barcode', not 'inventory' - already granted to the same three roles
+// (admin, manager, storekeeper). api/products-scan.php already checks
+// userCan('pos') || userCan('barcode') for this exact page's scans; that
+// OR-branch was effectively dead until this page's own gate matched it.
+requireModule('barcode');
 // Reject any POST that does not carry this session's CSRF token.
 // Placed before every handler on this page, and a no-op on GET.
 csrfRequire();
@@ -182,6 +186,13 @@ include 'inventory-header.php';
             <label class="form-label">Unit cost (optional)</label>
             <input type="number" step="0.01" min="0" id="costInput" class="form-control mb-2" placeholder="0.00" style="border-radius:10px;">
             <div class="form-text mb-2">Filling this in updates the item's weighted-average cost.</div>
+
+            <label class="form-label">Expiry date <span class="text-muted">(optional)</span></label>
+            <input type="date" id="expiryInput" class="form-control mb-2" style="border-radius:10px;">
+            <div class="form-text mb-2">
+                Leave blank for non-perishable goods. Filling this in dates the new
+                batch and keeps this item's expiry status accurate for pricing and the till.
+            </div>
             <?php endif; ?>
 
             <label class="form-label">Reason / note (optional)</label>
@@ -252,6 +263,14 @@ $pageScript = <<<HTML
         return;
     }
 
+    // This panel's own workflow fields. Unlike pos.php (which has many
+    // unrelated fields - customer phone, payment amounts - that a stray
+    // scan must never disturb), the normal flow HERE is "set the
+    // quantity, then scan" - so focus is often left in qtyInput when the
+    // operator fires the scanner. Exempting these from the "typing
+    // elsewhere" guard below is what lets scanning work from them too.
+    const OWN_FIELDS = ['qtyInput', 'costInput', 'expiryInput', 'reasonInput'];
+
     const MODE = '{$mode}';
     const CSRF_TOKEN = '{$csrfToken}';
 
@@ -306,6 +325,7 @@ $pageScript = <<<HTML
         }
         busy = true;
         const costEl = document.getElementById('costInput');
+        const expiryEl = document.getElementById('expiryInput');
 
         fetch('api/inventory-stock-in.php', {
             method: 'POST',
@@ -316,6 +336,7 @@ $pageScript = <<<HTML
                 quantity: qty,
                 mode: MODE,
                 unit_cost: costEl ? (parseFloat(costEl.value) || 0) : 0,
+                expiry_date: expiryEl ? expiryEl.value : '',
                 reason: document.getElementById('reasonInput').value
             })
         })
@@ -345,7 +366,7 @@ $pageScript = <<<HTML
         const editable = el && ['INPUT','TEXTAREA','SELECT'].includes(el.tagName);
 
         if (e.key === 'F2') { e.preventDefault(); focusScanner(); return; }
-        if (editable && el.id !== 'scanInput') return;
+        if (editable && el.id !== 'scanInput' && !OWN_FIELDS.includes(el.id)) return;
 
         if (e.key === 'Enter') {
             if (el === scanInput) {

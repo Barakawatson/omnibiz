@@ -84,9 +84,20 @@ if (!$ok) {
     exit;
 }
 
-// Clear the held sale this cart was resumed from, if any.
+// Link the held sale this cart was resumed from, if any - marks it
+// 'completed' and records resulting_txn_id, never deletes it. Ownership
+// is re-checked against the SESSION's own cashier/terminal (not
+// $body['terminal_id'], which is client-supplied) inside
+// posCompleteHeldSale(); a mismatch there only skips the link, since the
+// sale above has already succeeded and must not be undone by this.
 if (!empty($body['held_id'])) {
-    posDeleteHeldSale($conn, (int)$body['held_id']);
+    posCompleteHeldSale(
+        $conn,
+        (int)$body['held_id'],
+        (int)($_SESSION['id'] ?? 0),
+        (int)($_SESSION['pos_terminal_id'] ?? 0),
+        $txnId
+    );
 }
 
 $sale = posGetSale($conn, $txnId);

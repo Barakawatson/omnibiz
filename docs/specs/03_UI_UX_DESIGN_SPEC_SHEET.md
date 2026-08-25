@@ -71,12 +71,12 @@ Implemented **only** by redefining the CSS custom properties in one section of `
 ## 8. Interaction principles observed throughout
 
 - **A blocked action always states why**, in words a non-technical cashier or customer can act on ("Azam White Bread 600g expired on 10 Aug 2026 and cannot be sold. Please remove it from the shelf.") — never a bare refusal, never a stack trace.
-- **Destructive actions require confirmation** with the consequence spelled out (e.g. cancelling an approved PO, disabling a department that would drop N products off the till).
+- **Destructive actions require confirmation** with the consequence spelled out (e.g. cancelling an approved PO, disabling a department that would drop N products off the till). **A subset go further and require a stated reason, not just a yes/no**: voiding a completed sale, and — newer — cancelling a POS cart (Clear Cart, the last line item being removed, or discarding a held sale), each via one shared modal (dropdown of reason codes + free text for "Other") that writes a permanent record before anything actually disappears; backing out of the modal leaves the cart exactly as it was.
 - **In-use records are deactivated, not deleted**, with the flash message explaining why ("…is used by 4 product(s), so it was deactivated rather than deleted").
 - **First-run guidance is a checklist, not a nag**: the dashboard's setup banner has no dismiss button (an unconfigured shop shouldn't be able to hide the fact), disappears automatically the moment setup is genuinely complete, and every unfinished item links straight to the screen that fixes it.
 
 ## 9. Accessibility / robustness notes
 
-- Sidebar renders its "open" section server-side (not only via JS) so navigation still works with JavaScript disabled.
+- Sidebar renders its "open" section server-side (not only via JS) so navigation still works with JavaScript disabled — and only one section is ever server-flagged active, which is what makes it a genuine single-open accordion rather than the array-of-remembered-sections behaviour it drifted into previously (`MX.initSidebar()` now closes every other section before applying a manual toggle).
 - `aria-live`, `aria-expanded`, and keyboard focus are used on interactive chrome (filter panels, sidebar toggle, Escape-to-close).
 - Reduced-motion media query respected on the offer slideshow and other transitions.

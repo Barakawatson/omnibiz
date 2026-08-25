@@ -16,7 +16,12 @@ posBoot($conn);
 
 $userId = (int)($_SESSION['id'] ?? 0);
 $currentRole = $_SESSION['role'] ?? '';
-$canVoid = in_array($currentRole, ['admin', 'manager'], true);
+// 'pos_void' has existed in roleModules() (admin + manager only) since
+// before this check was written, but nothing ever called userCan() on
+// it - this hardcoded role check was doing the same job by hand. Wiring
+// it up here is a no-op today and self-maintaining if that key's role
+// list ever changes.
+$canVoid = userCan('pos_void');
 function psFlash($type, $msg) { $_SESSION['inv_flash'] = ['type' => $type, 'msg' => $msg]; }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'void') {

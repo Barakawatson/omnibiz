@@ -54,8 +54,18 @@
 // of a gap across the whole pre-existing catalogue. inv_disposal_request_lines
 // gains a nullable batch_id so disposal can target one specific batch
 // instead of an item's blended stock (see Milestone 5 of the plan).
+// v7: `inv_po_payments.efd_receipt_file`. Recording the payment that
+// fully settles a purchase order now requires the supplier's TRA EFD
+// receipt to be attached first - see poRecordPayment(). A partial
+// payment may still carry one if the cashier has it, but isn't blocked
+// without it; only the payment that zeroes the outstanding balance is.
+// v8: `inv_purchase_orders.due_date`, optional, settable at approval
+// (defaults to order_date + the new `default_payment_terms_days`
+// setting). Feeds the Supplier Liabilities dashboard's aging view -
+// nothing enforces it, it is purely informational for prioritising
+// which supplier to pay first.
 if (!defined('INV_SCHEMA_VERSION')) {
-    define('INV_SCHEMA_VERSION', '6');
+    define('INV_SCHEMA_VERSION', '8');
 }
 
 /**
@@ -234,6 +244,7 @@ function ensureInventorySchema(mysqli $conn): void {
         `order_date` DATE DEFAULT NULL,
         `expected_date` DATE DEFAULT NULL,
         `received_date` DATE DEFAULT NULL,
+        `due_date` DATE DEFAULT NULL,
         `total_amount` DECIMAL(14,2) NOT NULL DEFAULT 0.00,
         `payment_status` ENUM('unpaid','partial','paid') NOT NULL DEFAULT 'unpaid',
         `invoice_file` VARCHAR(255) DEFAULT NULL,
@@ -296,6 +307,7 @@ function ensureInventorySchema(mysqli $conn): void {
         `paid_from_account_id` INT(11) NOT NULL,
         `payment_date` DATE NOT NULL,
         `reference` VARCHAR(120) DEFAULT NULL,
+        `efd_receipt_file` VARCHAR(255) DEFAULT NULL,
         `journal_id` INT(11) DEFAULT NULL,
         `paid_by` INT(11) DEFAULT NULL,
         `paid_by_name` VARCHAR(100) DEFAULT NULL,
@@ -452,6 +464,27 @@ function ensureInventorySchema(mysqli $conn): void {
         $col->free();
     }
 
+    // --- v6 -> v7: EFD receipt attachment on a supplier payment ------------
+    $col = @$conn->query("SHOW COLUMNS FROM `inv_po_payments` LIKE 'efd_receipt_file'");
+    if ($col instanceof mysqli_result) {
+        if ($col->num_rows === 0) {
+            @$conn->query("ALTER TABLE `inv_po_payments`
+                ADD COLUMN `efd_receipt_file` VARCHAR(255) DEFAULT NULL AFTER `reference`");
+        }
+        $col->free();
+    }
+
+    // --- v7 -> v8: optional payment due date, for the Supplier
+    // Liabilities aging view -------------------------------------------
+    $col = @$conn->query("SHOW COLUMNS FROM `inv_purchase_orders` LIKE 'due_date'");
+    if ($col instanceof mysqli_result) {
+        if ($col->num_rows === 0) {
+            @$conn->query("ALTER TABLE `inv_purchase_orders`
+                ADD COLUMN `due_date` DATE DEFAULT NULL AFTER `received_date`");
+        }
+        $col->free();
+    }
+
     // --- v5 -> v6: disposal can target one specific batch ------------------
     $col = @$conn->query("SHOW COLUMNS FROM `inv_disposal_request_lines` LIKE 'batch_id'");
     if ($col instanceof mysqli_result) {
@@ -508,6 +541,7 @@ function ensureInventorySchema(mysqli $conn): void {
         ['currency', 'Tsh'],
         ['expiry_alert_days', '30'],
         ['default_location_id', '1'],
+        ['default_payment_terms_days', '30'],
         ['schema_version', (string)INV_SCHEMA_VERSION],
     ];
     $setStmt = $conn->prepare("INSERT INTO inv_settings (setting_key, setting_value) VALUES (?, ?)

@@ -31,8 +31,15 @@ if ($roleCol instanceof mysqli_result) {
     }
 }
 $blankRoleUsers = [];
+// Built from $allowedRoles (allSystemRoles()) rather than a second
+// hardcoded literal list, so this can never drift out of sync with
+// roleModules() the way the old 4-role literal did when 'accountant'
+// was added.
+$roleList = "'" . implode("','", array_map(function ($r) use ($conn) {
+    return $conn->real_escape_string($r);
+}, $allowedRoles)) . "'";
 $blankRes = @$conn->query("SELECT username, role FROM admin WHERE role IS NULL OR role = ''
-    OR role NOT IN ('admin','manager','storekeeper','cashier')");
+    OR role NOT IN ($roleList)");
 if ($blankRes instanceof mysqli_result) {
     while ($b = $blankRes->fetch_assoc()) {
         $blankRoleUsers[] = $b['username'] . ($b['role'] ? ' (' . $b['role'] . ')' : '');
@@ -179,6 +186,8 @@ function getRoleBadge($role) {
             return '<span class="mx-status s-success"><i class="fas fa-crown me-1"></i>Administrator</span>';
         case 'manager':
             return '<span class="mx-status s-success"><i class="fas fa-user-tie me-1"></i>Manager</span>';
+        case 'accountant':
+            return '<span class="mx-status s-info"><i class="fas fa-calculator me-1"></i>Accountant</span>';
         case 'storekeeper':
             return '<span class="mx-status s-info"><i class="fas fa-warehouse me-1"></i>Storekeeper</span>';
         case 'cashier':
@@ -397,6 +406,7 @@ include 'partials/page-header.php';
                         <select class="form-select" id="au_role" name="role" required>
                             <option value="cashier">Cashier — POS till, receipts, customers</option>
                             <option value="storekeeper">Storekeeper — stock intake, purchase orders, reorder alerts</option>
+                            <option value="accountant">Accountant — chart of accounts, journal, expenses, read-only sales reports</option>
                             <option value="manager">Manager — sales reports, inventory overrides, daily summaries</option>
                             <option value="admin">Administrator — full unrestricted system control</option>
                         </select>
@@ -430,6 +440,7 @@ include 'partials/page-header.php';
                         <select class="form-select" name="role" id="edit_role">
                             <option value="cashier">Cashier — POS till, receipts, customers</option>
                             <option value="storekeeper">Storekeeper — stock intake, purchase orders, reorder alerts</option>
+                            <option value="accountant">Accountant — chart of accounts, journal, expenses, read-only sales reports</option>
                             <option value="manager">Manager — sales reports, inventory overrides, daily summaries</option>
                             <option value="admin">Administrator — full unrestricted system control</option>
                         </select>

@@ -53,21 +53,27 @@ Stated because it shapes every other requirement: **the same source code must ru
 - Discounts at the order level.
 - Automatic 5% mark-down on stock within a configurable window (default 30 days) of its expiry date, shown as a slideshow on an optional second-screen customer display.
 - **Expired stock is refused at checkout, at the barcode scan, and on the grid** — not merely un-discounted.
-- Receipt printing on an 80 mm thermal layout, with the shop's own logo, address, TIN, VRN and payment instructions.
+- Receipt printing on an 80 mm thermal layout, with the shop's own logo, address, TIN, VRN and payment instructions; an organisation or government buyer's own address/TIN/email print too, when a cashier has recorded them against that customer.
 - Full-screen kiosk mode and a customer-facing second display (BroadcastChannel-based), both additive and unable to affect the sale.
+- The live cart survives an accidental refresh or crash (shadow-copied to the browser, offered back on the next load) and warns before the tab is closed with a sale in progress — separate from, and additional to, the deliberate server-side Hold Sale mechanism.
+- **Clearing a cart, removing its last item, or discarding a held sale all require a stated reason** and are permanently logged — visible only to Administrators — closing off "quietly make a transaction disappear" as a way to hide till discrepancies.
 
 ### 4.2 Inventory
 - One physical/logical item = one `inv_items` row; the same row is sold at the till, tracked in stock, and priced.
 - Every stock change (sale, receipt, damage, expiry, count correction, transfer, internal use) goes through a single function that locks the row, keeps a full audit trail, and maintains a running weighted-average cost.
 - Barcode generation and label printing.
 - Reorder alerts, low/out-of-stock views.
-- Stock requests (internal transfer/replenishment workflow).
+- Stock requests (internal transfer/replenishment workflow) — cashiers can raise their own requests, not only storekeepers; review stays with inventory holders.
+- Lot/batch-level expiry tracking: a delivery can carry its own expiry date (barcode stock-in and purchase-order receiving both support it), sold oldest-expiry-first (FEFO); an item's own expiry status is kept in step with whichever of its batches is still on the shelf, so freshly-received stock is never wrongly blocked from sale by an older, already-expired batch of the same item.
+- A staff-facing Expiry Alerts page (cashier, storekeeper, manager, administrator) showing everything nearing its expiry date at the same adjusted price the till would charge.
 
 ### 4.3 Purchasing
 - Purchase orders: draft → approved → (partially) received → paid.
 - **Approving an order, cancelling an approved order, and recording a supplier payment are restricted to Manager/Administrator** — a storekeeper can raise an order and receive goods, but cannot commit the shop's money.
 - Supplier invoice upload, content-validated.
 - Receiving stock posts inventory and the ledger together, atomically.
+- **The payment that fully settles a purchase order requires the supplier's EFD (TRA fiscal) receipt to be attached first** — a partial/interim payment may still carry one, but isn't blocked without it.
+- **Supplier Liabilities dashboard**: every open order's outstanding balance, aggregated across suppliers, with an optional due date for prioritising who to pay first. Administrator/Manager can record a payment from here; a Storekeeper sees the same figures read-only.
 
 ### 4.4 Accounting
 - Full double-entry ledger. Every sale, purchase, expense, stock write-off and daily-close variance posts a balanced journal entry automatically — there is no manual bookkeeping step for routine trade.
@@ -76,7 +82,7 @@ Stated because it shapes every other requirement: **the same source code must ru
 - **The one invariant that must always hold:** stock value on the shelf (`Σ current_stock × average_cost`) equals the Inventory Asset account balance in the ledger. This is checked after every change of consequence.
 
 ### 4.5 Reporting
-- A single Reporting Centre covering Sales, Inventory, Purchasing and Accounting — 23 reports from one shared renderer.
+- A single Reporting Centre covering Sales, Inventory, Purchasing, Accounting and Audit — one shared renderer.
 - Every report supports CSV, PDF and print output, drill-down into the underlying detail, and server-side pagination.
 - Reports read from the same authoritative functions the rest of the app uses (e.g. the P&L report calls the same function `admin/profit-loss.php` does) — nothing is recalculated a second, possibly-different way for reporting.
 
@@ -94,7 +100,7 @@ Stated because it shapes every other requirement: **the same source code must ru
 
 ## 5. Explicitly out of scope today
 
-Recorded so nobody assumes silently: batch/lot tracking, per-location stock (stock is one global quantity per product), refunds/credit notes as a distinct workflow (only whole-sale void exists), customer loyalty/CRM beyond name+phone, multi-tenancy (one shop per installation, verified — no `tenant_id` anywhere), any TRA/fiscal receipt submission (see the TRA audit — blocked on external approval, not a code gap), login rate-limiting.
+Recorded so nobody assumes silently: per-location stock (stock is one global quantity per product), refunds/credit notes as a distinct workflow (only whole-sale void exists), customer loyalty/CRM beyond name+phone (+ optional address/TIN/email for institutional buyers), multi-tenancy (one shop per installation, verified — no `tenant_id` anywhere), any TRA/fiscal receipt submission (see the TRA audit — blocked on external approval, not a code gap), login rate-limiting, blocking the browser's own refresh/close shortcuts (not something a web page can do reliably — see §4.1's cart-persistence approach instead).
 
 ## 6. Non-functional requirements
 

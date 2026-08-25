@@ -77,6 +77,139 @@ function posGetTerminal(mysqli $conn, int $terminalId): ?array {
     return $row ?: null;
 }
 
+// ---------- Terminal session locking ------------------------------------
+// One cashier per till at a time. `is_active` already means "enabled in
+// the terminal-management page" - a lock is a live session, an orthogonal
+// concept, which is why it lives in its own columns (schema v8) rather
+// than overloading that one. The timeout is a single setting
+// (terminal_lock_timeout_minutes in inv_settings), read here and nowhere
+// else, so "how stale is stale" is never a literal repeated in two files.
+
+/** Minutes of heartbeat silence before a lock is considered abandoned. */
+function posTerminalLockTimeoutMinutes(mysqli $conn): int {
+    return max(1, (int)getInvSetting($conn, 'terminal_lock_timeout_minutes', '20'));
+}
+
+/**
+ * Pure classifier - the one place that decides free/active/stale from a
+ * terminal row, so the login-time modal, the header switcher and the
+ * admin Tills page can never disagree about what a lock means.
+ */
+function posTerminalLockState(array $terminal, int $timeoutMinutes): string {
+    if (empty($terminal['locked_by_user_id'])) { return 'free'; }
+    $lastActivity = $terminal['last_activity_at'] ?? null;
+    if (!$lastActivity) { return 'stale'; }
+    $ageSeconds = time() - strtotime($lastActivity);
+    return ($ageSeconds > $timeoutMinutes * 60) ? 'stale' : 'active';
+}
+
+/**
+ * Atomic claim: SELECT ... FOR UPDATE locks the row for the length of
+ * this transaction, so two cashiers claiming the same free till at the
+ * same instant cannot both win - the second one's FOR UPDATE blocks
+ * until the first commits, then re-reads the now-owned row and loses.
+ * Mirrors recordStockMovement()'s lock-then-check-then-write shape.
+ *
+ * Returns [ok, message]. A re-claim by the same user (page refresh,
+ * heartbeat race) is idempotent and always succeeds.
+ */
+function posClaimTerminal(mysqli $conn, int $terminalId, int $userId, string $username, int $timeoutMinutes): array {
+    if ($terminalId <= 0 || $userId <= 0) { return [false, 'Invalid terminal or user.']; }
+
+    $conn->begin_transaction();
+    try {
+        $lock = $conn->prepare(
+            "SELECT id, name, is_active, locked_by_user_id, locked_by_username, last_activity_at
+             FROM pos_terminals WHERE id = ? FOR UPDATE"
+        );
+        $lock->bind_param('i', $terminalId);
+        $lock->execute();
+        $terminal = $lock->get_result()->fetch_assoc();
+        $lock->close();
+
+        if (!$terminal || (int)$terminal['is_active'] !== 1) {
+            throw new Exception('This till is not available.');
+        }
+
+        $state = posTerminalLockState($terminal, $timeoutMinutes);
+        $ownedByMe = (int)($terminal['locked_by_user_id'] ?? 0) === $userId;
+
+        if ($state === 'active' && !$ownedByMe) {
+            throw new Exception('Till "' . $terminal['name'] . '" is already in use by ' . $terminal['locked_by_username'] . '.');
+        }
+        // free, stale, or already ours - safe to (re)claim.
+
+        $upd = $conn->prepare(
+            "UPDATE pos_terminals
+             SET locked_by_user_id = ?, locked_by_username = ?, locked_at = NOW(), last_activity_at = NOW()
+             WHERE id = ?"
+        );
+        $upd->bind_param('isi', $userId, $username, $terminalId);
+        if (!$upd->execute()) { throw new Exception('Could not claim the till: ' . $upd->error); }
+        $upd->close();
+
+        $conn->commit();
+        return [true, 'Till claimed.'];
+    } catch (Exception $e) {
+        $conn->rollback();
+        return [false, $e->getMessage()];
+    }
+}
+
+/**
+ * Explicit release, keyed to the owning user - a cashier can only ever
+ * release their own lock this way, never someone else's. Used on normal
+ * logout and when switching to a different terminal.
+ */
+function posReleaseTerminal(mysqli $conn, int $terminalId, int $userId): void {
+    if ($terminalId <= 0 || $userId <= 0) { return; }
+    $stmt = $conn->prepare(
+        "UPDATE pos_terminals
+         SET locked_by_user_id = NULL, locked_by_username = NULL, locked_at = NULL, last_activity_at = NULL
+         WHERE id = ? AND locked_by_user_id = ?"
+    );
+    $stmt->bind_param('ii', $terminalId, $userId);
+    $stmt->execute();
+    $stmt->close();
+}
+
+/**
+ * Admin/manager override - no ownership check, because authorization is
+ * the caller's job. The only call site is admin/pos-terminals.php, which
+ * is already gated by requireModule('terminals') (admin/manager only),
+ * the same "the page gate is the control" pattern purchasing_approve
+ * and disposal_approve already use elsewhere in this app.
+ */
+function posForceReleaseTerminal(mysqli $conn, int $terminalId): void {
+    if ($terminalId <= 0) { return; }
+    $stmt = $conn->prepare(
+        "UPDATE pos_terminals
+         SET locked_by_user_id = NULL, locked_by_username = NULL, locked_at = NULL, last_activity_at = NULL
+         WHERE id = ?"
+    );
+    $stmt->bind_param('i', $terminalId);
+    $stmt->execute();
+    $stmt->close();
+}
+
+/**
+ * Heartbeat: advances last_activity_at only for the session that
+ * currently owns the lock. Returns false when this session no longer
+ * owns it (force-released, reclaimed as stale, or never claimed) so the
+ * caller can tell the client to stop and re-select a till.
+ */
+function posHeartbeat(mysqli $conn, int $terminalId, int $userId): bool {
+    if ($terminalId <= 0 || $userId <= 0) { return false; }
+    $stmt = $conn->prepare(
+        "UPDATE pos_terminals SET last_activity_at = NOW() WHERE id = ? AND locked_by_user_id = ?"
+    );
+    $stmt->bind_param('ii', $terminalId, $userId);
+    $stmt->execute();
+    $affected = $stmt->affected_rows > 0;
+    $stmt->close();
+    return $affected;
+}
+
 // ---------- Receipt numbers -------------------------------------------
 
 /**
@@ -402,6 +535,45 @@ function posCheckout(
             if ($custId <= 0) { $custId = null; }
         }
 
+        // ---- Institutional details (organisation / government customer) --
+        // Merge anything newly typed into the stored customer record -
+        // never overwrite a stored value with a blank one, so leaving a
+        // field empty on a later visit doesn't erase what was captured
+        // before. The sale then snapshots the EFFECTIVE (post-merge)
+        // values, never a live join, so an edit to the customer record
+        // later can never rewrite an old receipt.
+        $newAddress = trim((string)($customer['address'] ?? ''));
+        $newTin     = trim((string)($customer['tin'] ?? ''));
+        $newEmail   = trim((string)($customer['email'] ?? ''));
+        $effAddress = $newAddress;
+        $effTin     = $newTin;
+        $effEmail   = $newEmail;
+        if ($custId) {
+            $cStmt = $conn->prepare("SELECT address, tin, email FROM customer WHERE id = ?");
+            $cStmt->bind_param('i', $custId);
+            $cStmt->execute();
+            $stored = $cStmt->get_result()->fetch_assoc() ?: [];
+            $cStmt->close();
+
+            if ($newAddress === '') { $effAddress = (string)($stored['address'] ?? ''); }
+            if ($newTin === '')     { $effTin     = (string)($stored['tin'] ?? ''); }
+            if ($newEmail === '')   { $effEmail   = (string)($stored['email'] ?? ''); }
+
+            if ($newAddress !== '' || $newTin !== '' || $newEmail !== '') {
+                $uStmt = $conn->prepare("UPDATE customer SET
+                    address = IF(? <> '', ?, address),
+                    tin     = IF(? <> '', ?, tin),
+                    email   = IF(? <> '', ?, email)
+                    WHERE id = ?");
+                $uStmt->bind_param('ssssssi', $newAddress, $newAddress, $newTin, $newTin, $newEmail, $newEmail, $custId);
+                $uStmt->execute();
+                $uStmt->close();
+            }
+        }
+        $snapAddress = $effAddress !== '' ? $effAddress : null;
+        $snapTin     = $effTin !== ''     ? $effTin     : null;
+        $snapEmail   = $effEmail !== ''   ? $effEmail   : null;
+
         // ---- Header row (retry once on receipt-number collision) ---------
         $receiptNo = '';
         $txnId = 0;
@@ -411,15 +583,18 @@ function posCheckout(
             $ins = $conn->prepare("INSERT INTO sales_transactions
                 (receipt_no, terminal_id, department, cashier_id, cashier_name,
                  customer_type, customer_id, customer_name, customer_phone,
+                 customer_tin, customer_address, customer_email,
                  subtotal, discount, tax_rate, tax_amount, total, total_cost, gross_profit,
                  amount_paid, change_due, payment_method, note)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
             // receipt(s) terminal(i) dept(s) cashier_id(i) cashier(s)
             // cust_type(s) cust_id(i) cust_name(s) cust_phone(s)
-            // then 9 decimals, then method(s) note(s) = 20 parameters.
-            $ins->bind_param('sisississdddddddddss',
+            // cust_tin(s) cust_address(s) cust_email(s)
+            // then 9 decimals, then method(s) note(s) = 23 parameters.
+            $ins->bind_param('sisississsssdddddddddss',
                 $receiptNo, $terminalIdVal, $saleDepartment, $cashierId, $cashierName,
                 $custType, $custId, $custName, $custPhone,
+                $snapTin, $snapAddress, $snapEmail,
                 $subtotal, $orderDiscount, $taxRate, $taxAmount, $total, $totalCost, $grossProfit,
                 $amountPaid, $changeDue, $method, $note);
             if ($ins->execute()) {
@@ -617,6 +792,22 @@ function posVoidSale(mysqli $conn, int $txnId, ?int $userId, string $reason = ''
         $upd->close();
 
         invAudit($conn, $userId, 'pos_void', 'sales_transaction', $txnId, $txn['receipt_no'] . ' - ' . $reason);
+
+        // If this sale started life as a held sale, cross-reference the
+        // void onto that held sale's own audit trail too. Its `status`
+        // stays 'completed' - that fact doesn't become false just because
+        // the resulting sale was later reversed - but the trail then
+        // reads created -> resumed -> completed -> voided in full.
+        $heldLookup = $conn->prepare("SELECT id FROM pos_held_sales WHERE resulting_txn_id = ? LIMIT 1");
+        $heldLookup->bind_param('i', $txnId);
+        $heldLookup->execute();
+        $heldRef = $heldLookup->get_result()->fetch_assoc();
+        $heldLookup->close();
+        if ($heldRef) {
+            invAudit($conn, $userId, 'held_sale_voided', 'held_sale', (int)$heldRef['id'],
+                'Sale ' . $txn['receipt_no'] . ' voided - ' . $reason);
+        }
+
         $conn->commit();
         return [true, 'Sale ' . $txn['receipt_no'] . ' voided, stock returned and ledger reversed.'];
     } catch (Throwable $e) {
@@ -631,12 +822,17 @@ function posVoidSale(mysqli $conn, int $txnId, ?int $userId, string $reason = ''
  * Increment stock for one item by barcode/id (storekeeper scanning
  * deliveries in). Uses the same locked audit-trail movement.
  * $mode: 'add' (receive N more) or 'set' (physical count = N).
+ * $expiryDate: optional best-before date for this delivery (mode 'add'
+ * only) - not every item is perishable, so it's fine to leave blank.
  * Returns [ok, message, newQty].
  */
-function posStockIn(mysqli $conn, int $itemId, float $qty, ?int $userId, string $mode = 'add', float $unitCost = 0.0, string $reason = ''): array {
+function posStockIn(mysqli $conn, int $itemId, float $qty, ?int $userId, string $mode = 'add', float $unitCost = 0.0, string $reason = '', ?string $expiryDate = null): array {
     if ($itemId <= 0) { return [false, 'Unknown item.', 0.0]; }
     if ($mode === 'add' && $qty <= 0) { return [false, 'Quantity must be greater than zero.', 0.0]; }
     if ($mode === 'set' && $qty < 0) { return [false, 'Counted quantity cannot be negative.', 0.0]; }
+    // A malformed or blank date is treated as "not supplied" rather than
+    // rejecting the whole stock-in - most goods aren't perishable.
+    $expiryDate = ($expiryDate !== null && strtotime($expiryDate) !== false) ? $expiryDate : null;
 
     $conn->begin_transaction();
     try {
@@ -672,8 +868,9 @@ function posStockIn(mysqli $conn, int $itemId, float $qty, ?int $userId, string 
         // falls back at the till.
         require_once __DIR__ . '/inv_batches_functions.php';
         if ($delta > 0) {
-            // Adding stock: create a batch. The barcode station doesn't
-            // capture expiry dates, so this batch sorts last in FEFO.
+            // Adding stock: create a batch, dated if the storekeeper
+            // supplied a best-before date for this delivery. Undated
+            // batches sort last in FEFO (treated as non-perishable).
             $batchCost = $unitCost > 0 ? $unitCost : 0.0;
             if ($batchCost <= 0) {
                 $costStmt = $conn->prepare("SELECT average_cost, purchase_price FROM inv_items WHERE id = ?");
@@ -684,7 +881,7 @@ function posStockIn(mysqli $conn, int $itemId, float $qty, ?int $userId, string 
                 $batchCost = (float)($costRow['average_cost'] > 0 ? $costRow['average_cost'] : $costRow['purchase_price']);
             }
             [$bOk, $bMsg, $batchId] = createBatch(
-                $conn, $itemId, null, $delta, $batchCost, null, 'barcode_station', null
+                $conn, $itemId, null, $delta, $batchCost, $expiryDate, 'barcode_station', null
             );
             if (!$bOk) { error_log("Batch creation failed for barcode stock-in of item {$itemId}: $bMsg"); }
         } elseif ($delta < 0) {
@@ -697,6 +894,11 @@ function posStockIn(mysqli $conn, int $itemId, float $qty, ?int $userId, string 
                 error_log("FEFO deduction failed for barcode count adjustment of item {$itemId}: {$fefo['message']}");
             }
         }
+        // Either branch can change which batch is now the earliest-active
+        // one (a fresh dated batch arriving, or the old one depleting) -
+        // keep the item's own expiry_date (what pricing/checkout actually
+        // read) in step with it either way.
+        refreshItemExpiryFromBatches($conn, $itemId);
 
         $conn->commit();
         return [true, $item['name'] . ': ' . ($mode === 'set' ? 'adjusted to ' : 'stock now ') . invQty($after) . '.', $after];
@@ -764,19 +966,438 @@ function posHoldSale(mysqli $conn, array $cart, ?int $cashierId, string $cashier
     $ok = $stmt->execute();
     $id = (int)$conn->insert_id;
     $stmt->close();
+    if ($ok) {
+        // status starts 'held' (schema default) - this is just the audit
+        // entry for that first moment, so "Created" is distinct from
+        // every later state change on the same row.
+        invAudit($conn, $cashierId, 'held_sale_created', 'held_sale', $id, $label);
+    }
     return $ok ? [true, 'Sale held as "' . $label . '".', $id] : [false, 'Could not hold the sale.', 0];
 }
 
-function posGetHeldSales(mysqli $conn): array {
-    $res = @$conn->query("SELECT * FROM pos_held_sales ORDER BY created_at DESC LIMIT 30");
+// ---------- Held-sale lifecycle -----------------------------------------
+// A held sale is never hard-deleted once claimed by a real cashier -
+// every terminal state (completed/cancelled/expired/orphaned) is a
+// status UPDATE, so the full history survives. `status` moves forward
+// through: held -> {stale -> expired}, held/stale -> resumed ->
+// completed, held/stale -> cancelled, held/stale/resumed -> orphaned
+// (logout). "Voided" is not a stored status here - see posVoidSale()'s
+// cross-reference instead, since the held sale genuinely WAS completed
+// and that fact shouldn't change just because the resulting sale was
+// later reversed.
+
+/**
+ * Lazily recomputes staleness/expiry on read - the same idiom this app
+ * already uses elsewhere for time-based state (no cron exists here, and
+ * none should be introduced for a check this cheap). Only ever moves a
+ * row FORWARD; a row already resumed, completed, cancelled or orphaned
+ * is left untouched. Each transition is logged to inv_audit_log exactly
+ * once, because the WHERE clause only ever matches a row still sitting
+ * in the state it's transitioning out of - a repeat sweep is a no-op.
+ */
+function posSweepHeldSales(mysqli $conn): void {
+    $staleMin  = (int)getInvSetting($conn, 'held_sale_stale_minutes', '30');
+    $expiryMin = (int)getInvSetting($conn, 'held_sale_expiry_minutes', '120');
+
+    // held -> stale: still in the active queue, just flagged as ageing.
+    $stmt = $conn->prepare("SELECT id FROM pos_held_sales WHERE status = 'held' AND created_at < NOW() - INTERVAL ? MINUTE");
+    $stmt->bind_param('i', $staleMin);
+    $stmt->execute();
+    $staleIds = array_column($stmt->get_result()->fetch_all(MYSQLI_ASSOC), 'id');
+    $stmt->close();
+    if ($staleIds) {
+        $in = implode(',', array_map('intval', $staleIds));
+        $conn->query("UPDATE pos_held_sales SET status = 'stale' WHERE id IN ($in)");
+        foreach ($staleIds as $id) {
+            invAudit($conn, null, 'held_sale_stale', 'held_sale', (int)$id, 'No activity for over ' . $staleMin . ' minute(s).');
+        }
+    }
+
+    // held/stale -> expired: removed from the active cashier queue;
+    // visible only via manager recovery from here on.
+    $stmt = $conn->prepare("SELECT id FROM pos_held_sales WHERE status IN ('held','stale') AND created_at < NOW() - INTERVAL ? MINUTE");
+    $stmt->bind_param('i', $expiryMin);
+    $stmt->execute();
+    $expireIds = array_column($stmt->get_result()->fetch_all(MYSQLI_ASSOC), 'id');
+    $stmt->close();
+    if ($expireIds) {
+        $in = implode(',', array_map('intval', $expireIds));
+        $conn->query("UPDATE pos_held_sales SET status = 'expired' WHERE id IN ($in)");
+        foreach ($expireIds as $id) {
+            invAudit($conn, null, 'held_sale_expired', 'held_sale', (int)$id, 'No activity for over ' . $expiryMin . ' minute(s).');
+        }
+    }
+}
+
+/**
+ * A cashier's own active held sales, on their own currently-locked
+ * terminal only - never another cashier's, never another terminal's.
+ * This is what admin/pos.php renders; another cashier's cart_json never
+ * reaches this browser at all, closing the information leak the old
+ * unfiltered posGetHeldSales() had.
+ */
+function posGetHeldSalesForCashier(mysqli $conn, int $cashierId, int $terminalId): array {
+    posSweepHeldSales($conn);
+    if ($cashierId <= 0 || $terminalId <= 0) { return []; }
+    $stmt = $conn->prepare(
+        "SELECT * FROM pos_held_sales
+         WHERE cashier_id = ? AND terminal_id = ? AND status IN ('held','stale')
+         ORDER BY created_at DESC LIMIT 30"
+    );
+    $stmt->bind_param('ii', $cashierId, $terminalId);
+    $stmt->execute();
+    $rows = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+    $stmt->close();
+    return $rows;
+}
+
+/**
+ * Server-side resume - the ownership + concurrency gate. SELECT ... FOR
+ * UPDATE locks the row for the length of this transaction, so two
+ * resume attempts on the same held sale can't both win: the second
+ * one's FOR UPDATE blocks until the first commits, then re-reads the
+ * now-'resumed' row and correctly loses. Ownership is checked against
+ * the cashier_id/terminal_id the CALLER already derived from the
+ * session (never a client-supplied value) - a forged held_sale_id
+ * belonging to another cashier or terminal is rejected here, not just
+ * hidden from the list. Returns [ok, message, cartJson].
+ */
+function posResumeHeldSale(mysqli $conn, int $heldSaleId, int $cashierId, int $terminalId): array {
+    if ($heldSaleId <= 0 || $cashierId <= 0 || $terminalId <= 0) { return [false, 'Invalid request.', null]; }
+
+    $conn->begin_transaction();
+    try {
+        $lock = $conn->prepare("SELECT id, cashier_id, terminal_id, status, cart_json FROM pos_held_sales WHERE id = ? FOR UPDATE");
+        $lock->bind_param('i', $heldSaleId);
+        $lock->execute();
+        $row = $lock->get_result()->fetch_assoc();
+        $lock->close();
+
+        if (!$row) { throw new Exception('That held sale no longer exists.'); }
+        if ((int)$row['cashier_id'] !== $cashierId || (int)$row['terminal_id'] !== $terminalId) {
+            throw new Exception('That held sale does not belong to you on this till.');
+        }
+        if (!in_array($row['status'], ['held', 'stale'], true)) {
+            throw new Exception('This held sale is ' . $row['status'] . ' and cannot be resumed.');
+        }
+
+        $upd = $conn->prepare("UPDATE pos_held_sales SET status = 'resumed', resumed_at = NOW() WHERE id = ?");
+        $upd->bind_param('i', $heldSaleId);
+        $upd->execute();
+        $upd->close();
+
+        $conn->commit();
+        invAudit($conn, $cashierId, 'held_sale_resumed', 'held_sale', $heldSaleId, '');
+        return [true, 'Held sale resumed.', $row['cart_json']];
+    } catch (Throwable $e) {
+        $conn->rollback();
+        return [false, $e->getMessage(), null];
+    }
+}
+
+/**
+ * Marks a held sale 'completed' and links it to the sale it became,
+ * once checkout has already succeeded. Ownership is re-checked
+ * defensively (the real gate already ran in posResumeHeldSale() - a
+ * 'resumed' row can only belong to whoever resumed it), but a mismatch
+ * here must never fail an already-completed sale - money and stock are
+ * already committed - so this only ever skips the link and leaves a
+ * trace of why.
+ */
+function posCompleteHeldSale(mysqli $conn, int $heldSaleId, int $cashierId, int $terminalId, int $txnId): void {
+    if ($heldSaleId <= 0) { return; }
+
+    $conn->begin_transaction();
+    try {
+        $lock = $conn->prepare("SELECT id, cashier_id, terminal_id, status FROM pos_held_sales WHERE id = ? FOR UPDATE");
+        $lock->bind_param('i', $heldSaleId);
+        $lock->execute();
+        $row = $lock->get_result()->fetch_assoc();
+        $lock->close();
+
+        if (!$row || (int)$row['cashier_id'] !== $cashierId || (int)$row['terminal_id'] !== $terminalId || $row['status'] !== 'resumed') {
+            $conn->rollback();
+            invAudit($conn, $cashierId, 'held_sale_link_mismatch', 'held_sale', $heldSaleId,
+                'Sale #' . $txnId . ' completed but could not be linked (held sale was ' . ($row['status'] ?? 'missing') . ').');
+            return;
+        }
+
+        $upd = $conn->prepare("UPDATE pos_held_sales SET status = 'completed', resulting_txn_id = ? WHERE id = ?");
+        $upd->bind_param('ii', $txnId, $heldSaleId);
+        $upd->execute();
+        $upd->close();
+
+        $conn->commit();
+        invAudit($conn, $cashierId, 'held_sale_completed', 'held_sale', $heldSaleId, 'Completed as sale #' . $txnId . '.');
+    } catch (Throwable $e) {
+        $conn->rollback();
+    }
+}
+
+/**
+ * Called from logout.php, before the terminal lock is released (that is
+ * its own separate, independent action - see posReleaseTerminal()).
+ * Every held/stale/resumed row this cashier still has becomes
+ * 'orphaned' - never deleted, never silently handed to whoever logs
+ * into this or any other terminal next. Two audit rows per affected
+ * sale: the logout event itself, then the resulting state change.
+ * Returns the number of rows affected.
+ */
+function posOrphanHeldSalesForCashier(mysqli $conn, int $cashierId): int {
+    if ($cashierId <= 0) { return 0; }
+
+    $stmt = $conn->prepare("SELECT id FROM pos_held_sales WHERE cashier_id = ? AND status IN ('held','stale','resumed')");
+    $stmt->bind_param('i', $cashierId);
+    $stmt->execute();
+    $ids = array_column($stmt->get_result()->fetch_all(MYSQLI_ASSOC), 'id');
+    $stmt->close();
+    if (!$ids) { return 0; }
+
+    $in = implode(',', array_map('intval', $ids));
+    $conn->query("UPDATE pos_held_sales SET status = 'orphaned', orphaned_at = NOW() WHERE id IN ($in)");
+    foreach ($ids as $id) {
+        invAudit($conn, $cashierId, 'held_sale_cashier_logout', 'held_sale', (int)$id, 'Cashier logged out while this sale was still held.');
+        invAudit($conn, $cashierId, 'held_sale_orphaned', 'held_sale', (int)$id, '');
+    }
+    return count($ids);
+}
+
+/**
+ * Called from admin/pos.php right after a successful posClaimTerminal()
+ * - a separate, independent step, same "orphan and release are two
+ * different actions" reasoning as logout.php. Only ever touches rows
+ * this SAME cashier orphaned themselves; a different cashier claiming a
+ * terminal never sees someone else's orphaned sale move. Moves each row
+ * back to 'held' on whichever terminal was just claimed (which may not
+ * be the one it was originally held on - the cashier is what matters,
+ * not the till) and clears orphaned_at, so it reappears in their own
+ * queue exactly as if it had never been orphaned. The orphan/logout
+ * audit rows from before are untouched - this only adds one more event
+ * on top, it never rewrites history. Returns the number of rows
+ * reclaimed.
+ */
+function posReclaimOwnOrphanedHeldSales(mysqli $conn, int $cashierId, int $terminalId): int {
+    if ($cashierId <= 0 || $terminalId <= 0) { return 0; }
+
+    $stmt = $conn->prepare("SELECT id FROM pos_held_sales WHERE cashier_id = ? AND status = 'orphaned'");
+    $stmt->bind_param('i', $cashierId);
+    $stmt->execute();
+    $ids = array_column($stmt->get_result()->fetch_all(MYSQLI_ASSOC), 'id');
+    $stmt->close();
+    if (!$ids) { return 0; }
+
+    $in = implode(',', array_map('intval', $ids));
+    $upd = $conn->prepare("UPDATE pos_held_sales SET status = 'held', terminal_id = ?, orphaned_at = NULL WHERE id IN ($in)");
+    $upd->bind_param('i', $terminalId);
+    $upd->execute();
+    $upd->close();
+    foreach ($ids as $id) {
+        invAudit($conn, $cashierId, 'held_sale_reclaimed', 'held_sale', (int)$id,
+            'Automatically returned to held on the owning cashier\'s own next login.');
+    }
+    return count($ids);
+}
+
+/**
+ * Manager/admin recovery: reassigns an orphaned or expired held sale to
+ * a currently-active cashier/terminal (the caller is expected to offer
+ * only currently-locked terminals - see Phase 2's posGetTerminals()/lock
+ * columns - so the sale lands on someone actually logged in right now
+ * rather than immediately going stale again) and reopens it as 'held'.
+ * The original row is reused, not duplicated - its full history stays
+ * in inv_audit_log regardless of how many times its status changes -
+ * and recovered_by/recovery_reason/recovered_at record who authorized
+ * this and why, directly on the row for the manager UI to show without
+ * a join. The reassigned cashier then resumes/completes it through the
+ * ordinary path above, which naturally sets resulting_txn_id on this
+ * same row - no separate/duplicate completion workflow.
+ */
+function posRecoverHeldSale(mysqli $conn, int $heldSaleId, int $newCashierId, string $newCashierName, int $newTerminalId, int $recoveredByUserId, string $reason): array {
+    $reason = trim($reason);
+    if ($heldSaleId <= 0 || $newCashierId <= 0 || $newTerminalId <= 0) { return [false, 'Invalid request.']; }
+    if ($reason === '') { return [false, 'A recovery reason is required.']; }
+
+    $conn->begin_transaction();
+    try {
+        $lock = $conn->prepare("SELECT id, status FROM pos_held_sales WHERE id = ? FOR UPDATE");
+        $lock->bind_param('i', $heldSaleId);
+        $lock->execute();
+        $row = $lock->get_result()->fetch_assoc();
+        $lock->close();
+
+        if (!$row) { throw new Exception('That held sale no longer exists.'); }
+        if (!in_array($row['status'], ['orphaned', 'expired'], true)) {
+            throw new Exception('Only an orphaned or expired held sale can be recovered (this one is ' . $row['status'] . ').');
+        }
+
+        $upd = $conn->prepare(
+            "UPDATE pos_held_sales
+             SET status = 'held', cashier_id = ?, cashier_name = ?, terminal_id = ?,
+                 recovered_by = ?, recovery_reason = ?, recovered_at = NOW()
+             WHERE id = ?"
+        );
+        $upd->bind_param('isiisi', $newCashierId, $newCashierName, $newTerminalId, $recoveredByUserId, $reason, $heldSaleId);
+        if (!$upd->execute()) { throw new Exception('Could not recover this held sale.'); }
+        $upd->close();
+
+        $conn->commit();
+        invAudit($conn, $recoveredByUserId, 'held_sale_manager_recovery', 'held_sale', $heldSaleId,
+            'Reassigned to ' . $newCashierName . ' - ' . $reason);
+        return [true, 'Held sale recovered and reassigned to ' . $newCashierName . '.'];
+    } catch (Throwable $e) {
+        $conn->rollback();
+        return [false, $e->getMessage()];
+    }
+}
+
+/**
+ * Manager/admin view: sweeps first (so status is current), then returns
+ * every held sale regardless of status, newest first, joined to its
+ * terminal for name/department. admin/pos-held-sales.php filters
+ * $row['status'] client-side for its two sections rather than this
+ * running two separate queries.
+ */
+function posGetHeldSalesForReview(mysqli $conn): array {
+    posSweepHeldSales($conn);
+    $res = $conn->query(
+        "SELECT h.*, t.name AS terminal_name, t.code AS terminal_code, t.department AS terminal_department
+         FROM pos_held_sales h
+         LEFT JOIN pos_terminals t ON t.id = h.terminal_id
+         ORDER BY h.created_at DESC
+         LIMIT 200"
+    );
     return ($res instanceof mysqli_result) ? $res->fetch_all(MYSQLI_ASSOC) : [];
 }
 
-function posDeleteHeldSale(mysqli $conn, int $id): void {
-    $stmt = $conn->prepare("DELETE FROM pos_held_sales WHERE id = ?");
-    $stmt->bind_param('i', $id);
+/**
+ * Full inv_audit_log history for one held sale, oldest first - the
+ * workflow a manager sees before deciding whether/how to recover it.
+ * Fetched on demand (one row's history, not all 200 rows' worth up
+ * front) by admin/api/pos-held-sale-history.php. A NULL user_id (the
+ * lazy sweep runs with nobody attributable) reads as "System".
+ */
+function posGetHeldSaleAuditTrail(mysqli $conn, int $heldSaleId): array {
+    if ($heldSaleId <= 0) { return []; }
+    $stmt = $conn->prepare(
+        "SELECT l.action, l.details, l.created_at, a.username
+         FROM inv_audit_log l
+         LEFT JOIN admin a ON a.id = l.user_id
+         WHERE l.entity_type = 'held_sale' AND l.entity_id = ?
+         ORDER BY l.id ASC"
+    );
+    $stmt->bind_param('i', $heldSaleId);
     $stmt->execute();
+    $rows = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
     $stmt->close();
+    return $rows;
+}
+
+/**
+ * Permanent record of a cart that never became a sale - the live cart
+ * emptied via Clear Cart (or its last item removed), or a parked held
+ * sale discarded. A reason is mandatory by the time this is called (the
+ * caller enforces that; this just refuses to write an empty one, failing
+ * closed rather than silently accepting an unaudited cancellation).
+ *
+ * When $source is 'held_sale', the row is locked (SELECT ... FOR UPDATE)
+ * and ownership-checked against $cashierId/$terminalId, exactly like
+ * posResumeHeldSale() - a cashier can only cancel a held sale that is
+ * actually theirs, on the till they are actually on. The snapshot
+ * written to cancelled_carts then comes from the row's OWN stored
+ * cart_json/total_estimate, never the caller-supplied $items/
+ * $totalValue, so a cashier cannot report fabricated contents for what
+ * they cancelled. The row is marked 'cancelled', never deleted - its
+ * created_at is still carried onto the audit row as held_since, since
+ * that moment (not when it was later discarded) is what a manager
+ * reviewing the report actually wants.
+ *
+ * Returns [ok, message, id].
+ */
+function posLogCancelledCart(
+    mysqli $conn,
+    ?int $cashierId,
+    string $cashierName,
+    int $terminalId,
+    string $source,
+    ?int $heldSaleId,
+    string $reasonCode,
+    string $reasonDetail,
+    array $items,
+    float $totalValue
+): array {
+    $reasonCode = trim($reasonCode);
+    if ($reasonCode === '') { return [false, 'A cancellation reason is required.', 0]; }
+    $source = ($source === 'held_sale') ? 'held_sale' : 'live_cart';
+    $terminalIdVal = $terminalId > 0 ? $terminalId : null;
+    $heldSaleIdVal = ($source === 'held_sale' && $heldSaleId && $heldSaleId > 0) ? $heldSaleId : null;
+    $reasonDetailVal = trim($reasonDetail) ?: null;
+    $json = json_encode(array_values($items));
+    $itemCount = count($items);
+
+    if ($heldSaleIdVal !== null && $terminalId <= 0) {
+        // No real terminal lock on this session - fail closed rather than
+        // risk (int)NULL matching 0 in the ownership check below.
+        return [false, 'No till is currently assigned to your session.', 0];
+    }
+
+    $conn->begin_transaction();
+    try {
+        $heldSinceVal = null;
+        if ($heldSaleIdVal !== null) {
+            $hStmt = $conn->prepare(
+                "SELECT created_at, cashier_id, terminal_id, status, cart_json, item_count, total_estimate
+                 FROM pos_held_sales WHERE id = ? FOR UPDATE"
+            );
+            $hStmt->bind_param('i', $heldSaleIdVal);
+            $hStmt->execute();
+            $hRow = $hStmt->get_result()->fetch_assoc();
+            $hStmt->close();
+
+            if (!$hRow) { throw new Exception('That held sale no longer exists.'); }
+            if ((int)$hRow['cashier_id'] !== (int)$cashierId || (int)$hRow['terminal_id'] !== $terminalId) {
+                throw new Exception('That held sale does not belong to you on this till.');
+            }
+            if (!in_array($hRow['status'], ['held', 'stale'], true)) {
+                throw new Exception('This held sale is ' . $hRow['status'] . ' and cannot be cancelled from here.');
+            }
+            $heldSinceVal = $hRow['created_at'];
+            $json = $hRow['cart_json'];
+            $itemCount = (int)$hRow['item_count'];
+            $totalValue = (float)$hRow['total_estimate'];
+        }
+
+        $stmt = $conn->prepare(
+            "INSERT INTO cancelled_carts
+                (cashier_id, cashier_name, terminal_id, source, held_sale_id, held_since,
+                 reason_code, reason_detail, itemized_cart_json, item_count, total_value)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        );
+        $stmt->bind_param('isisissssid',
+            $cashierId, $cashierName, $terminalIdVal, $source, $heldSaleIdVal, $heldSinceVal,
+            $reasonCode, $reasonDetailVal, $json, $itemCount, $totalValue);
+        if (!$stmt->execute()) { $stmt->close(); throw new Exception('Could not record the cancellation.'); }
+        $id = (int)$conn->insert_id;
+        $stmt->close();
+
+        if ($heldSaleIdVal !== null) {
+            $updHeld = $conn->prepare("UPDATE pos_held_sales SET status = 'cancelled' WHERE id = ?");
+            $updHeld->bind_param('i', $heldSaleIdVal);
+            $updHeld->execute();
+            $updHeld->close();
+        }
+
+        $conn->commit();
+
+        if ($heldSaleIdVal !== null) {
+            invAudit($conn, $cashierId, 'held_sale_cancelled', 'held_sale', $heldSaleIdVal,
+                'Reason: ' . $reasonCode . ($reasonDetailVal ? ' - ' . $reasonDetailVal : ''));
+        }
+
+        return [true, 'Cancellation recorded.', $id];
+    } catch (Throwable $e) {
+        $conn->rollback();
+        return [false, $e->getMessage(), 0];
+    }
 }
 
 // ---------- Receipt payload -------------------------------------------

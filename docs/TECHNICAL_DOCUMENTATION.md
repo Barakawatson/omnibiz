@@ -75,7 +75,7 @@ PHP native sessions. Passwords hashed with bcrypt (`password_hash` / `password_v
 
 ### Authorization
 
-Role-based access control with four roles and eighteen module permissions, enforced server-side at the top of every page by `requireRole()` or `requireModule()`.
+Role-based access control with five roles and twenty-five module permissions, enforced server-side at the top of every page by `requireRole()` or `requireModule()`.
 
 ### APIs
 
@@ -424,7 +424,7 @@ customer ──────┘            │                          (snapshot
                             └──1:n──► sales_payments   (one row per tender)
 ```
 
-A sale has **one** header, **n** lines, and **n** tenders. `sales_transactions.payment_method` holds a single method, or the literal `'split'` when more than one was used; the truth is in `sales_payments`. `pos_held_sales` holds a parked cart as JSON, server-side so any terminal can resume it.
+A sale has **one** header, **n** lines, and **n** tenders. `sales_transactions.payment_method` holds a single method, or the literal `'split'` when more than one was used; the truth is in `sales_payments`. `pos_held_sales` holds a parked cart as JSON, server-side, scoped to the cashier and terminal that held it (see "Held sales" below — as of 25 August 2026 it is no longer true that any terminal can resume any held sale).
 
 **Purchasing relationships.**
 
@@ -505,8 +505,8 @@ All 31 tables present in `retailer_shop`.
 | `sales_transactions` | Sale headers. | `receipt_no` (unique), `terminal_id`, `department`, `cashier_id`, `cashier_name`, `customer_type` (cash/registered), `customer_id`, `customer_name`, `customer_phone`, `subtotal`, `discount`, `tax_rate`, `tax_amount`, `total`, `total_cost`, `gross_profit`, `amount_paid`, `change_due`, `payment_method` (or `'split'`), `status` (completed/voided), `void_reason`, `voided_by`, `voided_at`, `note` | Parent of items and payments |
 | `sales_transaction_items` | Sale lines — **historical snapshot**. | `transaction_id`, `item_id`, `item_name`, `barcode`, `department`, `quantity`, `unit_price`, `unit_cost`, `line_discount`, `line_total` | FK → transaction CASCADE |
 | `sales_payments` | One row per tender. | `transaction_id`, `method` (cash/lipa_namba/bank/card), `amount`, `reference` | FK → transaction CASCADE |
-| `pos_terminals` | Till definitions. | `name`, `code` (unique), `department`, `location_id`, `is_active` | Referenced by sales and held sales |
-| `pos_held_sales` | Parked carts, server-side. | `label`, `terminal_id`, `cashier_id`, `cashier_name`, `cart_json` (mediumtext), `item_count`, `total_estimate` | — |
+| `pos_terminals` | Till definitions + live session lock (v8, 25 Aug 2026). | `name`, `code` (unique), `department`, `location_id`, `is_active`, `locked_by_user_id`, `locked_by_username`, `locked_at`, `last_activity_at` | Referenced by sales and held sales. A lock is a live session, orthogonal to `is_active` (enabled/deactivated) |
+| `pos_held_sales` | Parked carts, server-side, with a real lifecycle (v9, 25 Aug 2026). | `label`, `terminal_id`, `cashier_id`, `cashier_name`, `cart_json` (mediumtext), `item_count`, `total_estimate`, `status`, `resumed_at`, `orphaned_at`, `resulting_txn_id`, `recovered_by`, `recovery_reason`, `recovered_at` | Never hard-deleted — see "Held sales" below |
 
 ### Accounting (`acc_*`)
 
@@ -628,28 +628,35 @@ Every page's first executable statement after including `auth.php` is `requireRo
 
 ## 8. Authorization / RBAC
 
+*(Rewritten 25 August 2026 against the actual current `includes/auth.php` — the previous revision of this section described a 4-role, 18-key model that a since-completed RBAC hardening pass superseded. Verify against `roleModules()` directly if this ever looks stale again; don't assume a key is enforced just because it's listed.)*
+
 ### Roles
 
-Four, defined by `allSystemRoles()`:
+Five, defined by `allSystemRoles()`:
 
 ```php
-['admin', 'manager', 'storekeeper', 'cashier']
+['admin', 'manager', 'accountant', 'storekeeper', 'cashier']
 ```
 
-`roleLabel()` maps them to *Administrator*, *Manager*, *Storekeeper*, *Cashier*.
+`roleLabel()` maps them to *Administrator*, *Manager*, *Accountant*, *Storekeeper*, *Cashier*.
 
 ### Module permissions
 
-`roleModules(string $role): array` returns the module keys a role may use. Eighteen keys exist:
+`roleModules(string $role): array` returns the module keys a role may use. Twenty-five keys exist:
 
-`dashboard`, `manager_overview`, `pos`, `pos_sales`, `pos_void`, `products`, `inventory`, `purchasing`, `barcode`, `stock_requests`, `customers`, `accounting`, `accounting_manage`, `reports`, `users`, `settings`, `departments`
+`dashboard`, `manager_overview`, `pos`, `pos_sales`, `pos_void`, `products`, `inventory`, `purchasing`, `purchasing_approve`, `barcode`, `stock_requests`, `customers`, `accounting`, `accounting_manage`, `sales_reports`, `users`, `settings`, `departments`, `shop_settings`, `disposal_approve`, `expiry_alerts`, `supplier_liabilities`, `fraud_audit`, `terminals`, `held_sales_review`
 
 | Role | Modules |
 |---|---|
-| `admin` | All eighteen |
+| `admin` | All twenty-five |
 | `manager` | All except `accounting_manage` and `departments` |
-| `storekeeper` | `products`, `inventory`, `purchasing`, `barcode`, `stock_requests` |
-| `cashier` | `pos`, `pos_sales`, `customers` |
+| `accountant` | `dashboard`, `accounting`, `accounting_manage`, `sales_reports` — the books, full stop, plus read-only sales figures to reconcile. Deliberately no POS/inventory/terminal access and no `purchasing_approve` (spend authorization is operational, not bookkeeping) |
+| `storekeeper` | `products`, `inventory`, `purchasing`, `barcode`, `stock_requests`, `expiry_alerts`, `supplier_liabilities` (read-only, enforced by the page rather than a separate key) — deliberately **not** `purchasing_approve`: raising a PO and receiving goods is the job, approving spend and paying a supplier is a supervisor's decision |
+| `cashier` | `pos`, `pos_sales`, `stock_requests`, `expiry_alerts` — no `customers` (the till's own phone-lookup goes through `api/customer-lookup.php`, gated on `pos`, and `posCheckout()`'s own merge logic; the full customer CRUD page is not needed for checkout) |
+
+Two keys are deliberately shared between admin and manager only, never storekeeper or cashier, because they're supervisor surfaces rather than day-to-day work: `terminals` (`admin/pos-terminals.php` — till management, force-release) and `held_sales_review` (`admin/pos-held-sales.php` — reviewing/recovering orphaned or expired held sales; a cashier only ever sees their *own* active ones, and that's enforced in the query itself, not by this key). `fraud_audit` (Cancelled Carts report) and `disposal_approve` follow the same admin+manager sharing rule.
+
+`sales_reports` (the shop-wide Sales report GROUP: summary/by-cashier/by-terminal/transactions) is kept deliberately separate from `pos_sales` (a cashier's own-till-only sales list) so granting one can never silently grant the other — this split, and the new `accountant` role, `purchasing`/`purchasing_approve` split, `barcode` key, and `pos_void` enforcement below, are all part of the same 25 August 2026 hardening pass; see `CLAUDE.md`'s "Roles & access" and "POS additions" sections for the reasoning behind each.
 
 ### `userCan()`
 
@@ -699,12 +706,13 @@ function authIsApiRequest(): bool {
 |---|---|---|
 | `admin` | `index.php` | `admin/dashboard` |
 | `manager` | `manager-overview.php` | `manager/overview` |
+| `accountant` | `accounting-dashboard.php` | `admin/accounting-dashboard.php` (no clean-URL alias of its own yet — the `.htaccess` rewrites are hand-listed per role) |
 | `storekeeper` | `inventory-dashboard.php` | `inventory` |
 | `cashier` | `pos.php` | `pos/terminal` |
 
 ### Complete page-to-guard map
 
-Verified by inspecting the first guard statement in every file in `admin/`.
+*(Re-verified 25 August 2026 against the actual guard statement in every file — several entries below moved off the general `inventory` key onto their own key during the hardening pass.)*
 
 | Page | Guard |
 |---|---|
@@ -713,15 +721,23 @@ Verified by inspecting the first guard statement in every file in `admin/`.
 | `manager-overview.php` | `requireModule('manager_overview')` |
 | `pos.php` | `requireModule('pos')` |
 | `pos-sales.php`, `pos-receipt.php` | `requireModule('pos_sales')` |
+| `pos-terminals.php` | `requireModule('terminals')` |
+| `pos-held-sales.php` | `requireModule('held_sales_review')` |
 | `retail-products.php` | `requireModule('products')` |
 | `manage-customers.php` | `requireModule('customers')` |
-| `inventory-dashboard.php`, `-items`, `-movements`, `-categories`, `-units`, `-suppliers`, `-purchase-orders`, `-po-view`, `-requests`, `-reports`, `barcode-station.php`, `barcode-labels.php` | `requireModule('inventory')` |
+| `expiry-alerts.php` | `requireModule('expiry_alerts')` |
+| `shop-settings.php` | `requireModule('shop_settings')` |
+| `inventory-requests.php` | `requireModule('stock_requests')` — **not** `inventory`; this is the one Inventory-section page a cashier can open |
+| `inventory-purchase-orders.php`, `inventory-po-view.php` | `requireModule('purchasing')` |
+| `barcode-station.php`, `barcode-labels.php` | `requireModule('barcode')` |
+| `inventory-dashboard.php`, `-items`, `-movements`, `-categories`, `-units`, `-suppliers`, `-disposal`, `-reports` | `requireModule('inventory')` |
 | `inventory-settings.php` | `requireRole(['admin','manager'])` |
 | `manage-users.php` | `requireRole(['admin','manager'])` |
 | `accounting-dashboard.php`, `expenses.php`, `journal.php`, `journal-entry.php`, `profit-loss.php`, `z-report.php` | `requireModule('accounting')` |
 | `chart-of-accounts.php` | `requireModule('accounting_manage')` |
 | `departments.php` | `requireModule('departments')` |
-| `api/pos-checkout.php` | `requireModule('pos')` |
+| `api/pos-checkout.php`, `api/pos-cancel-cart.php`, `api/pos-resume-held.php`, `api/pos-terminal-heartbeat.php`, `api/customer-lookup.php` | `requireModule('pos')` |
+| `api/pos-held-sale-history.php` | `requireModule('held_sales_review')` |
 | `api/inventory-stock-in.php` | `requireModule('inventory')` |
 | `api/products-scan.php` | `userCan('pos') \|\| userCan('barcode')` |
 | `notifications-api.php` | Session check only; each count is individually gated by `userCan()` |
@@ -730,9 +746,12 @@ Verified by inspecting the first guard statement in every file in `admin/`.
 
 **Secondary, in-page checks** (defence in depth beyond the page guard):
 
-- `pos-sales.php` — voiding requires role `admin` or `manager`
+- `pos-sales.php` — voiding requires `userCan('pos_void')` *(25 August 2026 — previously an inline `in_array($role, ['admin','manager'])` check; now a real module key, same enforcement point)*
+- `pos-receipt.php` — a non-admin/manager viewer must additionally be the sale's own `cashier_id`, or gets a 403 *(25 August 2026 — closes a receipt IDOR where any cashier could view any receipt by changing the id in the URL)*
+- `admin/pos.php`'s `select_terminal` POST handler — a session already holding a *different* active terminal lock is refused outright, server-side, regardless of what the header UI offers *(25 August 2026, see CLAUDE.md "Terminal session-locking")*
+- `admin/pos-held-sales.php`'s recovery action — the target cashier is read from the chosen terminal's own live lock (`posTerminalLockState() === 'active'`), never a separately typed account
 - `journal.php` — posting and reversing require `userCan('accounting_manage')`
-- `inventory-requests.php` — reviewing requires `userCan('inventory')`
+- `inventory-requests.php` — reviewing/approving requires `userCan('inventory')` (raising a request only needs `stock_requests`, which a cashier also has)
 
 ### Approval rights in purchasing
 
@@ -801,7 +820,7 @@ Cart state is a **plain JavaScript array in page memory**:
 { id, name, price, qty, stock }
 ```
 
-`renderCart()` rebuilds the cart DOM; `totals()` recomputes subtotal, discount, tax and grand total for display. **Nothing is persisted client-side** — no `localStorage`, no `sessionStorage`. Refreshing the page loses the cart. Parking a sale means POSTing it to `pos_held_sales`, server-side.
+`renderCart()` rebuilds the cart DOM; `totals()` recomputes subtotal, discount, tax and grand total for display. Deliberately holding a sale means POSTing it to `pos_held_sales`, server-side (see "Held sales" below) — that is the durable copy. Separately, the in-progress cart is also debounce-saved to `localStorage` (`mxPosCartShadow_<terminalId>`) purely as a crash/refresh safety net; on load, `checkCartShadow()` offers it back via a "Restore your previous cart?" modal if it's less than 12 hours old, then discards it either way. This shadow copy never reaches the server and is not the same mechanism as a held sale.
 
 ### Checkout API
 
@@ -920,11 +939,36 @@ Receipt numbers: `posGenerateReceiptNo()` produces `MRT-YYYYMMDD-NNNXXX` where `
 
 ### Held sales
 
-`pos_held_sales` stores the cart as JSON server-side, so **any** terminal can resume a sale held at another. On successful checkout, if `held_id` was supplied, `posDeleteHeldSale()` removes it. Held sales are listed most-recent-first, limited to 30.
+*(Rewritten 25 August 2026 — the held-sale feature was fully re-architected for ownership, terminal isolation and a real lifecycle; the previous "any terminal can resume any held sale, checkout deletes the row" description no longer applies to any part of the system.)*
+
+`pos_held_sales` stores the cart as JSON server-side, keyed to `cashier_id` + `terminal_id`. A held sale is **never hard-deleted** — `posDeleteHeldSale()` no longer exists — every terminal state is a `status` update instead:
+
+```
+held → {stale → expired}
+held/stale → resumed → completed
+held/stale → cancelled
+held/stale/resumed → orphaned (cashier logout)
+orphaned/expired → held (manager recovery, or the same cashier's own next login)
+```
+
+"Voided" is not a stored status: when a sale that came from a held sale is later voided, `posVoidSale()` cross-references it and logs a `held_sale_voided` event against the original row (its `status` correctly stays `completed`).
+
+| Function | Does |
+|---|---|
+| `posGetHeldSalesForCashier($conn, $cashierId, $terminalId)` | The **only** reader `admin/pos.php` uses — scoped to that cashier on that terminal, `status IN ('held','stale')`. Another cashier's cart never reaches the browser |
+| `posResumeHeldSale()` | `SELECT ... FOR UPDATE` + ownership check against the session's own cashier/terminal (never client-supplied) + status check, then flips to `resumed`. Serializes concurrent resume attempts on the same row |
+| `posCompleteHeldSale()` | Called from `api/pos-checkout.php` after a successful sale; flips `resumed → completed` and sets `resulting_txn_id`. A mismatch here (forged `held_id`) never fails the already-completed sale — it only skips the link and logs `held_sale_link_mismatch` |
+| `posOrphanHeldSalesForCashier()` | Called from `logout.php`; flips a cashier's own `held`/`stale`/`resumed` rows to `orphaned`. Never deletes, never hands them to whoever logs in next |
+| `posReclaimOwnOrphanedHeldSales()` | Called from `admin/pos.php`'s terminal-claim handler; if the **same** cashier who orphaned a sale claims a terminal again, it silently returns to `held`. A different cashier claiming the till in between never triggers this |
+| `posRecoverHeldSale()` | Manager/admin action (`admin/pos-held-sales.php`, key `held_sales_review`) reassigning an `orphaned`/`expired` row to a **currently-active** cashier — read from that terminal's own live lock, never typed in — and reopening it as `held`. Stamps `recovered_by`/`recovery_reason`/`recovered_at` |
+| `posSweepHeldSales()` | Lazy, on-read staleness/expiry sweep (`held_sale_stale_minutes`/`held_sale_expiry_minutes` in `inv_settings`, defaults 30/120) — the same idiom as the batch-expiry lazy recompute elsewhere in the app |
+| `posGetHeldSaleAuditTrail()` | Every `inv_audit_log` row for one held sale, oldest first — the workflow timeline shown in `admin/pos-held-sales.php`'s Recover modal and History button (`api/pos-held-sale-history.php`) |
+
+**Audit events** (all `entity_type = 'held_sale'` in `inv_audit_log`): `held_sale_created`, `held_sale_resumed`, `held_sale_completed`, `held_sale_cashier_logout`, `held_sale_orphaned`, `held_sale_reclaimed`, `held_sale_stale`, `held_sale_expired`, `held_sale_cancelled`, `held_sale_voided`, `held_sale_manager_recovery`, `held_sale_link_mismatch`.
 
 ### Voiding
 
-`posVoidSale()` — one transaction; locks the sale row `FOR UPDATE`; returns every line's stock as a `return` movement; reads the original tenders from `sales_payments`, applies the same change-netting, and posts the reversal via `accPostSaleVoid()`; flags the header `voided`. **Idempotent** — voiding an already-voided sale commits and reports *"This sale was already voided."*
+`posVoidSale()` — one transaction; locks the sale row `FOR UPDATE`; returns every line's stock as a `return` movement; reads the original tenders from `sales_payments`, applies the same change-netting, and posts the reversal via `accPostSaleVoid()`; flags the header `voided`. **Idempotent** — voiding an already-voided sale commits and reports *"This sale was already voided."* Since 25 August 2026 it also checks `pos_held_sales.resulting_txn_id` for a match and logs `held_sale_voided` against the originating held sale, if any (see "Held sales" above).
 
 ---
 
@@ -1222,7 +1266,9 @@ Two design decisions worth noting:
 
 ## 13. API documentation
 
-Four JSON endpoints. All are session-authenticated; none accept an API key or token; all are same-origin only.
+*(Updated 25 August 2026 — four new endpoints added for terminal session-locking and held-sale ownership; see §13.4–§13.7.)*
+
+Eight JSON endpoints under `admin/api/`, plus `admin/notifications-api.php`. All are session-authenticated; none accept an API key or token; all are same-origin only. Not documented in detail below: `admin/api/customer-lookup.php` (`requireModule('pos')`, phone-number lookup/autofill for checkout).
 
 ---
 
@@ -1298,7 +1344,7 @@ Four JSON endpoints. All are session-authenticated; none accept an API key or to
 | `amount_paid` | float | legacy | Used with `payment_method` |
 | `customer` | object | no | `{type:'cash'\|'registered', name?:string, phone?:string}` |
 | `terminal_id` | int | no | Falls back to `$_SESSION['pos_terminal_id']` |
-| `held_id` | int | no | The held sale this cart came from; deleted on success |
+| `held_id` | int | no | The held sale this cart was resumed from, if any. **Never deleted** (25 Aug 2026) — `posCompleteHeldSale()` links it (`status → 'completed'`, `resulting_txn_id` set), re-checking ownership against the *session's own* cashier/terminal, not this field. A mismatch only skips the link; it does not fail the sale, which has already committed by this point |
 | `note` | string | no | |
 
 **Prices, totals, tax and cost are never taken from the request.** They are recomputed server-side from the database.
@@ -1383,7 +1429,109 @@ In `set` mode the message reads `"…: adjusted to 140.000."`, or when the count
 
 ---
 
-### 13.4 `GET admin/notifications-api.php`
+### 13.4 `POST admin/api/pos-cancel-cart.php`
+
+**Purpose:** records a cart that never became a sale — the live in-progress cart cleared, or a held sale discarded — with a mandatory reason. The one path that closes out a held sale without completing it.
+
+**Authentication:** signed-in session with `pos`.
+
+**Request (JSON):**
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `source` | string | yes | `'live_cart'` or `'held_sale'` |
+| `held_sale_id` | int | if `source='held_sale'` | Ownership-checked against the session's own cashier/terminal — **not** the `terminal_id` field below |
+| `items` | array | yes | `[{item_id, name, qty}, …]` — for `held_sale` source, the row's own stored `cart_json` is used instead (25 Aug 2026), so a cashier cannot report fabricated contents for what they're cancelling |
+| `total` | float | yes | Same override rule as `items` for `held_sale` source |
+| `reason_code` | string | yes | One of the UI's dropdown values |
+| `reason_detail` | string | if `reason_code='other'` | |
+| `terminal_id` | int | no | **Session-derived only as of 25 Aug 2026** — this field is accepted but ignored for the ownership check |
+
+**Success (HTTP 200):** `{ "ok": true, "message": "Cancellation recorded." }`
+
+**Failure (HTTP 200):** `{"ok":false,"message":"…"}` — `"A cancellation reason is required."`, `"That held sale no longer exists."`, `"That held sale does not belong to you on this till."` (25 Aug 2026 — closes an IDOR where a client-supplied `held_sale_id` for another cashier's row was accepted with no check), `"This held sale is completed and cannot be cancelled from here."` (or whatever status it is)
+
+**Wrong method:** HTTP 405 · **Unauthenticated:** HTTP 401 · **Wrong role:** HTTP 403
+
+---
+
+### 13.5 `POST admin/api/pos-resume-held.php`
+
+*Added 25 August 2026.*
+
+**Purpose:** the ownership + concurrency gate for resuming a held sale. The only way a held sale's `cart_json` ever reaches a browser — `admin/pos.php`'s list is already scoped to the caller's own rows, and this endpoint re-checks ownership again server-side before returning anything.
+
+**Authentication:** signed-in session with `pos`.
+
+**Request (JSON):**
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `held_sale_id` | int | yes | Checked against `$_SESSION['id']` / `$_SESSION['pos_terminal_id']` — never a client-supplied cashier/terminal id |
+
+**Success (HTTP 200):**
+
+```json
+{ "ok": true, "message": "Held sale resumed.",
+  "cart": [{ "id": 12, "name": "Azam Cola 500ml", "price": 1000, "qty": 2 }] }
+```
+
+**Failure (HTTP 200):** `{"ok":false,"message":"…"}` — `"That held sale no longer exists."`, `"That held sale does not belong to you on this till."`, `"This held sale is resumed and cannot be resumed."` (or whatever status it already is — also what a genuine concurrent double-resume attempt sees, since `SELECT ... FOR UPDATE` serializes the two attempts rather than letting them race)
+
+**Wrong method:** HTTP 405 · **Unauthenticated:** HTTP 401 · **Wrong role:** HTTP 403
+
+---
+
+### 13.6 `POST admin/api/pos-terminal-heartbeat.php`
+
+*Added 25 August 2026.*
+
+**Purpose:** keeps a claimed till's lock alive. Called every 45 seconds by `admin/pos.php` while a cashier has a terminal open.
+
+**Authentication:** signed-in session with `pos`.
+
+**Parameters:** none — the terminal id comes from `$_SESSION['pos_terminal_id']`, never the request body.
+
+**Success (HTTP 200):** `{ "ok": true }` — `last_activity_at` advanced.
+
+**Lock lost (HTTP 200):** `{ "ok": false }` — this session no longer holds the terminal it thinks it does (force-released by a manager, or reclaimed as stale by another cashier after the configured timeout). The client stops the heartbeat and re-shows the "Select a Till" modal; the in-progress cart is untouched.
+
+**Wrong method:** HTTP 405 · **Unauthenticated:** HTTP 401 · **Wrong role:** HTTP 403
+
+---
+
+### 13.7 `GET admin/api/pos-held-sale-history.php`
+
+*Added 25 August 2026.*
+
+**Purpose:** the full `inv_audit_log` workflow timeline for one held sale, oldest first — what `admin/pos-held-sales.php` shows a manager before deciding whether/how to recover it.
+
+**Authentication:** signed-in session with `held_sales_review` (admin/manager only).
+
+**Parameters (query string):**
+
+| Name | Type | Required | Notes |
+|---|---|---|---|
+| `id` | int | yes | The held sale's id |
+
+**Success (HTTP 200):**
+
+```json
+{ "ok": true, "trail": [
+  { "action": "held_sale_created", "label": "Created", "details": "jumja",
+    "created_at": "2026-08-25 10:08:27", "username": "test" },
+  { "action": "held_sale_stale", "label": "Marked ageing", "details": "No activity for over 30 minute(s).",
+    "created_at": "2026-08-25 11:37:49", "username": "System" }
+] }
+```
+
+`username` reads `"System"` for a lazy-sweep event (stale/expired), which has no attributable user. Rendered client-side with `createElement`/`textContent`, never `innerHTML`, since `details` can contain free text a cashier or manager typed (cancellation/recovery reasons).
+
+**Unauthenticated:** HTTP 401 · **Wrong role:** HTTP 403
+
+---
+
+### 13.8 `GET admin/notifications-api.php`
 
 **Purpose:** live counts for the sidebar badges. Polled every 30 seconds by `MX.watchAlerts()`.
 
@@ -1430,8 +1578,12 @@ In `set` mode the message reads `"…: adjusted to 140.000."`, or when the count
 | Endpoint | Protected |
 |---|---|
 | `POST admin/api/pos-checkout.php` | Yes — header, sent by `pos.php` |
+| `POST admin/api/pos-cancel-cart.php` | Yes — header, sent by `pos.php` |
+| `POST admin/api/pos-resume-held.php` | Yes — header, sent by `pos.php` *(25 Aug 2026)* |
+| `POST admin/api/pos-terminal-heartbeat.php` | Yes — header, sent by `pos.php` *(25 Aug 2026)* |
 | `POST admin/api/inventory-stock-in.php` | Yes — header, sent by `barcode-station.php` |
 | `GET admin/api/products-scan.php` | No — read-only |
+| `GET admin/api/pos-held-sale-history.php` | No — read-only, admin/manager only *(25 Aug 2026)* |
 | `GET admin/notifications-api.php` | No — read-only |
 
 **Helper API:**
@@ -1513,7 +1665,7 @@ Setting these in `php.ini` would have worked on this one machine and been lost t
 
 **Sessions.** Native PHP sessions, started through `appSessionStart()` so the cookie is `HttpOnly`, `SameSite=Lax`, `Secure` on HTTPS, and `session.use_strict_mode` is on. `session_regenerate_id(true)` on password login defeats fixation. Logout destroys the session and expires both cookies. See [14.2](#142-session-cookie-hardening).
 
-**RBAC.** Enforced server-side at the top of every page, before any work. Four roles, eighteen module keys. API endpoints return proper 401/403 JSON instead of redirecting. Secondary in-page checks add defence in depth for voiding, journal posting and request review.
+**RBAC.** Enforced server-side at the top of every page, before any work. Five roles, twenty-five module keys. API endpoints return proper 401/403 JSON instead of redirecting. Secondary in-page checks add defence in depth for voiding, journal posting, request review, receipt ownership, and terminal/held-sale ownership.
 
 **CSRF tokens.** Every state-changing form and JSON endpoint requires a per-session token; see [14.1](#141-csrf-protection).
 
@@ -1611,6 +1763,24 @@ Plain HTTP on port 8081. Passwords and session cookies cross the shop LAN in cle
 **13. No password expiry, history or self-service reset — LOW.**
 
 **14. `error_log()` only.** No structured application log, no security event log.
+
+*(Findings 15–19 below were discovered and fixed during a 23–25 August 2026 RBAC/POS hardening pass, and are appended here rather than reflowed into strict severity order, since finding numbers 1–14 above are cross-referenced elsewhere in this document by number.)*
+
+**15. ~~Unauthenticated password reset — CRITICAL.~~ FIXED 23 August 2026.**
+
+`admin/reset-password.php` reset any account's password with no authentication at all. Deleted outright — the shop has no legitimate self-service password-reset flow to preserve in its place.
+
+**16. ~~Receipt IDOR — MEDIUM.~~ FIXED 25 August 2026.**
+
+`admin/pos-receipt.php` rendered any receipt by id with no ownership check — a cashier could view another cashier's receipt (customer name, phone, amounts) by changing the id in the URL. Now checks the sale's `cashier_id` against the session for any non-admin/manager viewer.
+
+**17. ~~Held-sale cross-cashier IDOR — HIGH.~~ FIXED 25 August 2026.**
+
+Three related gaps in the held-sales feature, all closed together: (a) the held-sales list was unfiltered — every cashier's parked cart contents (items, prices) were embedded in *every other* cashier's page HTML; (b) resuming a held sale was 100% client-side, with no server-side ownership check at all; (c) both checkout and the cancel-cart endpoint deleted a client-supplied `held_sale_id` for *any* held sale, with no check that it belonged to the caller. See §13.4–§13.5 and "Held sales" above.
+
+**18. Till double-booking — MEDIUM.** FIXED 25 August 2026 (not previously a tracked finding — terminal selection was a session convenience, not an enforced boundary, until this pass). Two cashiers could select the same terminal and both operate on it at once, with no record of who actually held it. `pos_terminals` gained a real server-enforced lock (see "Terminal session-locking" in `CLAUDE.md`).
+
+**19. Sidebar link over-exposure — LOW.** FIXED 25 August 2026. Six Inventory-section sidebar links rendered for any role that could open the section at all, including a cashier who should see only Stock Requests — they predated the `stock_requests` carve-out and were never wrapped in their own module check. The underlying pages were already correctly gated server-side, so this was a navigation/information-disclosure issue (link *labels* visible for pages that would deny the click), never an actual access bypass.
 
 ---
 
@@ -2108,7 +2278,7 @@ Findings from this inspection. Each is stated plainly, with its consequence.
 9. **`inv_locations` has no management UI.** One default row is seeded; there is no way to add or edit locations.
 10. *(Resolved 13 August 2026.)* Departments used to be a fixed `ENUM('supermarket','stationery','general')` on all seven tables, so adding one was a schema change. They are now administrator-defined rows in `retail_departments`, and the seven columns are `VARCHAR(32)`. See [§24](#24-business-configuration).
 11. **`acc_expenses.receipt_file` is never populated** — no upload exists.
-12. **The `admin` table is misnamed.** It holds all four roles, not just administrators.
+12. **The `admin` table is misnamed.** It holds all five roles, not just administrators.
 
 ### Functional gaps
 
